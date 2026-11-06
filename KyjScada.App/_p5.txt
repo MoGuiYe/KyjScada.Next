@@ -1,0 +1,25 @@
+    private void OnUiTick (object sender, EventArgs e)
+    {
+        @@C@@  (_rows.Count == 0) return;
+
+        var snap = _bus.GetSnapshot ();
+
+        foreach (var row in _rows)
+        {
+            var tv = snap[row.Name];
+
+            @@C@@  (tv is null)
+            {
+                row.ValueText = "--";
+                row.QualityText = "未采集";
+                continue;
+            }
+
+            var d = tv.AsDouble ();
+            row.ValueText = d.HasValue ? d.Value.ToString ("F2") : "--";
+            row.QualityText = QualityText (tv.Quality);
+            row.TimeText = tv.ChangedAt.ToString ("HH:mm:ss");
+        }
+
+        ValueGrid.Items.Refresh ();
+    }

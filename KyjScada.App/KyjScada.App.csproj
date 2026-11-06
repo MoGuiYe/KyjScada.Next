@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KyjScada.Contracts\KyjScada.Contracts.csproj" />
+    <ProjectReference Include="..\KyjScada.Domain\KyjScada.Domain.csproj" />
+    <ProjectReference Include="..\KyjScada.Runtime\KyjScada.Runtime.csproj" />
+    <ProjectReference Include="..\KyjScada.Infrastructure\KyjScada.Infrastructure.csproj" />
+    <ProjectReference Include="..\KyjScada.Mcp\KyjScada.Mcp.csproj" />
+  </ItemGroup>
+
+  <!-- 内嵌 MCP 服务需要 ASP.NET Core 共享框架(MCP 的 HTTP 传输依赖它) -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>
+

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KyjScada.Infrastructure\KyjScada.Infrastructure.csproj" />
+    <ProjectReference Include="..\KyjScada.Domain\KyjScada.Domain.csproj" />
+    <ProjectReference Include="..\KyjScada.Runtime\KyjScada.Runtime.csproj" />
+    <ProjectReference Include="..\KyjScada.Mcp\KyjScada.Mcp.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,19 @@
+string FindRealSettings ()
+{
+    var baseDir = AppContext.BaseDirectory;
+    var probe = Path.Combine (baseDir, "_work");
+    @IF@  (Directory.Exists (probe))
+    {
+        var hit = Directory.GetFiles (probe, "ModbusTCP.json");
+        @IF@  (hit.Length > 0) return hit[0];
+    }
+
+    var appDir = Path.Combine (baseDir, "..", "..", "..", "..", "KyjScada.App", "bin", "Debug", "net8.0-windows", "settings");
+    @IF@  (Directory.Exists (appDir))
+    {
+        var hit2 = Directory.GetFiles (appDir, "ModbusTCP.json");
+        @IF@  (hit2.Length > 0) return hit2[0];
+    }
+
+    return null;
+}

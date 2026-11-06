@@ -1,0 +1,76 @@
+﻿settings: D:\DeepSeekHarness\KyjScada.Next\KyjScada.App\bin\Debug\net8.0-windows\settings
+database: D:\DeepSeekHarness\KyjScada.Next\KyjScada.App\bin\Debug\net8.0-windows\data\history.db
+--- list_variables OK ---
+数据模式: 新长表(History/VarDict)。变量总数: 36,匹配: 6
+
+| 变量名 | 设备 | 单位 |
+|---|---|---|
+| LQT_InPre | 空压机ModbusTCP |  |
+| LQT_InTemp | 空压机ModbusTCP |  |
+| LQT_Level | 空压机ModbusTCP |  |
+| LQT_OutPre | 空压机ModbusTCP |  |
+| LQT_OutTemp | 空压机ModbusTCP |  |
+| LQT_RTNTemp | 空压机ModbusTCP |  |
+
+--- list_variables(全部) OK ---
+数据模式: 新长表(History/VarDict)。变量总数: 36,匹配: 36
+
+| 变量名 | 设备 | 单位 |
+|---|---|---|
+| CQG1_OutPre | 空压机ModbusTCP |  |
+| CQG2_OutPre | 空压机ModbusTCP |  |
+| CQG3_OutPre | 空压机ModbusTCP |  |
+| CQG4_OutPre | 空压机ModbusTCP |  |
+| Env_Temp | 空压机ModbusTCP |  |
+| FQG_Pre | 空压机ModbusTCP |  |
+| FQG_Temp | 空压机ModbusTCP |  |
+| KYJ1_OutTemp | 空压机ModbusTCP |  |
+| KYJ2_OutTemp | 空压机ModbusTCP |  |
+| KYJ3_OutTemp | 空压机ModbusTCP |  |
+| KYJ4_OutTemp | 空压机ModbusTCP |  |
+| LQB1_Current | 空压机ModbusTCP |  |
+| LQB1_Fre | 空压机ModbusTCP |  |
+| LQB1_HeaterTemp | 空压机ModbusTCP |  |
+| LQB1_OutPre | 空压机ModbusTCP |  |
+...(截断)
+--- read_variable OK ---
+变量: LQT_Level
+值: 7758
+时间戳: 2026-11-05 21:27:34
+新鲜度: offline(约 4 小时前,数据已停)
+说明: 这是归档快照值,不是内存实时值。若新鲜度非 fresh,请勿当作当前状态。
+--- read_variables OK ---
+时间戳: 2026-11-05 21:27:34  新鲜度: offline(约 4 小时前,数据已停)
+
+| 变量 | 值 |
+|---|---|
+| LQT_Level | 7758 |
+| KYJ1_OutTemp | 39.099998 |
+
+--- query_stat OK ---
+在 2026-11-05 23:35:33 ~ 2026-11-06 01:35:33 范围内,变量 LQT_Level 无有效数值。
+--- query_alarms OK ---
+在 2026-11-05 01:35:33 ~ 2026-11-06 01:35:33 范围内无日志记录。
+--- get_device_summary OK ---
+# 组态概况
+组态文件: ModbusRTU.json, ModbusRTUOverTCP.json, ModbusTCP.json
+使用组态: ModbusTCP.json
+项目名: ModbusTCP空压机
+TCP 设备数: 1
+变量总数: 129(其中归档 35)
+  设备: 空压机ModbusTCP  127.0.0.1:502  激活=True
+    组: 实时组  起始=1.400001  长度=76  变量=46
+    组: 状态值  起始=1.000001  长度=52  变量=52
+    组: 设定值  起始=1.400101  长度=48  变量=24
+    组: 测试组  起始=1.400201  长度=13  变量=7
+
+# 数据库概况
+模式: new(History 长表)
+历史行数: 176771
+时间跨度: 2026-11-04 18:46:21 ~ 2026-11-05 21:27:34
+报警/日志行数: 0
+数据列数: 36
+  设备 空压机ModbusRTUOverTCP: 1 变量
+  设备 空压机ModbusTCP: 35 变量
+
+

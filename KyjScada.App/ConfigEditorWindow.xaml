@@ -1,0 +1,115 @@
+﻿<Window x:Class="KyjScada.App.ConfigEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="配置编辑器" Height="760" Width="1180"
+        Background="#181825" PreviewKeyDown="OnEditorKeyDown">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 工具栏 -->
+        <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
+            <WrapPanel Orientation="Horizontal">
+                <TextBlock Text="配置文件:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="12"/>
+                <ComboBox x:Name="FileBox" Width="200" Margin="6,0,16,0" VerticalAlignment="Center"
+                          SelectionChanged="OnFileChanged"/>
+
+                <Button Content="保存" Width="66" Height="26" Click="OnSave"
+                        Background="#2A3A2A" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="重新加载" Width="76" Height="26" Margin="6,0,0,0" Click="OnReload"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="校验" Width="60" Height="26" Margin="6,0,0,0" Click="OnValidate"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="导出变量表" Width="90" Height="26" Margin="6,0,0,0" Click="OnExportVars"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="导入变量表" Width="90" Height="26" Margin="6,0,0,0" Click="OnImportVars"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                <Rectangle Width="1" Height="20" Fill="#45475A" Margin="12,0"/>
+
+                <Button Content="新增组" Width="70" Height="26" Click="OnAddGroup"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="新增变量" Width="76" Height="26" Margin="6,0,0,0" Click="OnAddVariable"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="复制" Width="58" Height="26" Margin="6,0,0,0" Click="OnCopyNode"
+                        ToolTip="复制所选变量或整组(Ctrl+C)"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="粘贴" Width="58" Height="26" Margin="6,0,0,0" Click="OnPasteNode"
+                        ToolTip="粘贴到所选组(Ctrl+V)"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="批量阈值" Width="76" Height="26" Margin="6,0,0,0" Click="OnBatchThreshold"
+                        ToolTip="给所选变量或整组统一设置上下限与死区"
+                        Background="#313244" Foreground="#FFFFFF"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+                <Button Content="删除所选" Width="76" Height="26" Margin="6,0,0,0" Click="OnDeleteNode"
+                        Background="#4B2A2A" Foreground="#FCA5A5"
+                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                <TextBlock x:Name="DirtyText" Text="" Foreground="#F9E2AF"
+                           VerticalAlignment="Center" FontSize="12" Margin="16,0,0,0"/>
+            </WrapPanel>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="330"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左:配置树 -->
+            <Border Grid.Column="0" Background="#1E1E2E" BorderBrush="#313244" BorderThickness="0,0,1,0">
+                <TreeView x:Name="ConfigTree" Background="#181825" Foreground="#FFFFFF"
+                          BorderThickness="0" Padding="4"
+                          SelectedItemChanged="OnTreeSelectionChanged">
+                    <TreeView.Resources>
+                        <!-- 默认 TreeViewItem 用系统前景色(深底上几乎全黑),
+                             必须显式指定,否则文字看不见 -->
+                        <Style TargetType="TreeViewItem">
+                            <Setter Property="Foreground" Value="#FFFFFF"/>
+                            <Setter Property="Background" Value="Transparent"/>
+                            <Setter Property="Padding" Value="2,1"/>
+                            <Style.Triggers>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Foreground" Value="#1E1E2E"/>
+                                    <Setter Property="Background" Value="#89B4FA"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TreeView.Resources>
+                </TreeView>
+            </Border>
+
+            <!-- 右:属性面板(按所选节点动态生成) -->
+            <Border Grid.Column="1" Background="#181825">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
+                    <StackPanel>
+                        <TextBlock x:Name="NodeTitle" Text="请在左侧选择节点"
+                                   Foreground="#FFFFFF" FontSize="14" FontWeight="Bold"
+                                   Margin="0,0,0,10"/>
+                        <StackPanel x:Name="PropPanel"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+
+        <!-- 底部:校验结果 -->
+        <Border Grid.Row="2" Background="#1E1E2E" Padding="8">
+            <ScrollViewer Height="96" VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="ProblemText" Text="" Foreground="#C6CDE0"
+                           FontSize="12" TextWrapping="Wrap"/>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Window>

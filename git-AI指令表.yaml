@@ -1,0 +1,629 @@
+# ==============================================================================
+#  给 AI 的 Git 操作指令表 —— 项目文件，跟随项目走（非全局配置）
+#  平台：WorkBuddy（默认 Git Bash / POSIX sh）
+#
+#  用途：用户用中文自然语言提 git 需求时，AI 按本表把「提示词」翻译成「命令」执行。
+#  入口：AGENTS.md 由 WorkBuddy 每次会话自动加载，指向本文件。
+#  配套：git-操作对照表.md（面向人的可读版，含平台差异与危险等级速查）。
+#  复用：新建项目时把 AGENTS.md + 本文件 + git-操作对照表.md 一起复制到项目根目录；
+#        或把本文件作为参考文件封装成 WorkBuddy Skill（用户级 ~/.workbuddy/skills/，
+#        项目级 <项目>/.workbuddy/skills/），跨项目免复制。
+# ==============================================================================
+
+meta:
+  name: git-AI指令表
+  platform: WorkBuddy
+  version: 2
+  created: "2026-10-23"
+  updated: "2026-11-06"
+  scope: "项目内根目录（不要放进全局配置）"
+  how_to_use: "按 commands[].prompts 匹配用户的话，执行 commands[].command；同时遵守 platform 节"
+  placeholders:
+    "<file>": "从用户话里取文件名；含糊时先跑 git status --short 列候选让用户挑"
+    "<hash>": "提交号（可用 git --no-pager log --oneline 取 short hash）"
+    "<branch>": "分支名"
+    "<base>": "变基基准（分支或提交）"
+    "<URL>": "远程仓库地址"
+    "<N>": "数量（提交个数）"
+    "<n>": "stash / reflog 的序号"
+    "<vX>": "标签名，如 v1.0"
+    "<信息>": "提交信息，默认由 AI 拟一句中文概述"
+    "<说明>": "tag / stash 的说明文字"
+    "<名字>": "提交身份 user.name"
+    "<邮箱>": "提交身份 user.email"
+    "<旧名>": "分支重命名前的名字"
+    "<新名>": "分支重命名后的名字"
+    "<关键词>": "提交信息关键词"
+    "<文本>": "要搜索的代码文本"
+    "<起始行>": "blame 起始行号"
+    "<结束行>": "blame 结束行号"
+    "<目录>": "目标目录，用正斜杠绝对路径"
+    "<路径>": "目标路径，用正斜杠绝对路径，含空格加双引号"
+    "<子目录>": "子项目绝对路径，供 git -C 使用"
+  risk_levels:
+    safe: "只读或纯新增：直接执行并报告"
+    caution: "会改变仓库状态但可恢复：执行前一句话说明影响，执行后报告"
+    destructive: "会丢弃改动：先列出受影响的文件/提交范围 → 用询问工具确认 → 执行 → 回读校验"
+    history-rewrite: "改写已有提交历史：先说明后果并确认；已推送/共享分支必须特别提醒，优先改用 revert 或新提交"
+
+# ------------------------------------------------------------------------------
+#  WorkBuddy 执行环境：写命令前必读，优先级高于下面的单条 command
+# ------------------------------------------------------------------------------
+platform:
+  shell: "Git Bash（POSIX sh）；另有独立的 PowerShell 5.1 工具，仅用于注册表/COM/.NET 等 Windows 专属操作"
+  cwd: "默认工作目录是项目根目录，跨命令持久；工具没有 workdir 参数"
+  shell_state: "变量/别名/函数不跨命令持久，环境变量必须内联到同一条命令：GIT_TERMINAL_PROMPT=0 git push"
+  paths: "正斜杠；Windows 盘符写 /c/... /d/...；含空格加双引号；优先绝对路径，不靠 cd"
+  chaining: "有依赖的多条命令用 && 串成一次调用；相互独立可并行调用；不要用换行分隔命令"
+  interactive: "禁止交互：git rebase -i / add -i / add -p / commit 不带 -m / 任何等待输入或打开编辑器的命令"
+  pager: "统一 git --no-pager log|show|diff|blame|reflog|shortlog ...（或 git config core.pager cat）"
+  encoding: "UTF-8；中文文件名可设 git config core.quotepath false；PowerShell 工具写文件加 -Encoding utf8"
+  permission: "命令被权限/安全策略拒绝即终止，不换工具或等价命令重试，向用户说明原因"
+  modes: "Agent 直接执行 / Plan 先出计划 / Ask 只读不执行；破坏性操作用询问工具确认后再动手"
+  background: "git clone / git gc 等耗时命令走后台任务，不用尾随 & 或 nohup 脱离进程"
+  builtin_git_rules:
+    - "优先新建提交，不轻易 --amend（用户明确要求改上一条时除外）"
+    - "破坏性操作先考虑更安全的替代：已推送用 revert；还原文件用 restore 而非 checkout --"
+    - "不加 --no-verify 跳过钩子、不跳过签名；hook 失败修根因"
+    - "不用 git add -f 强行添加 .gitignore 覆盖的敏感文件"
+    - "不连发命令，一次一个操作，跑完核对输出"
+    - ".workbuddy/ 是项目数据目录，不清理不删除；平台安装目录只读，不进用户仓库"
+
+defaults:
+  language: "中文汇报"
+  report_format: "改了什么 → 执行结果（附 git status --short / git --no-pager log --oneline -n 5 摘要）"
+  commit_message: "由 AI 依据改动内容拟一句中文概述，除非用户指定"
+  red_lines:
+    - "永不 git add -f 含明文密码/密钥的配置文件（如 ScreenBlanker.ini）"
+    - "永不提交 dist/、build/、node_modules/ 与 *.exe 等打包产物（.gitignore 已排除）"
+    - "提交前先 git status --short 扫一遍：产物、大文件（>10MB）、敏感配置命中就拦下"
+    - "不猜命令 id、不连发命令；命令被拒绝后不换工具或等价命令重试"
+    - "一次一个操作，跑完核对输出再决定下一步"
+
+commands:
+
+  # ---------- 0. 初始化与身份 ----------
+  - group: "初始化与身份"
+    intent: "检查当前目录是不是 git 仓库"
+    prompts: ["这个文件夹是 git 仓库吗", "检查一下有没有 git"]
+    command: "git rev-parse --is-inside-work-tree"
+    risk: safe
+
+  - group: "初始化与身份"
+    intent: "初始化仓库"
+    prompts: ["把这个文件夹变成 git 仓库", "初始化 git", "这里建个仓库"]
+    command: "git init -b main"
+    risk: safe
+
+  - group: "初始化与身份"
+    intent: "查看当前提交身份与配置"
+    prompts: ["现在提交用的是什么身份", "看看这个仓库的 git 配置"]
+    command: "git config user.name && git config user.email && git config --local --list"
+    risk: safe
+
+  - group: "初始化与身份"
+    intent: "修改本仓库提交身份"
+    prompts: ["把本项目的提交身份改成 张三 zhangsan@qq.com"]
+    command: "git config user.name \"<名字>\" && git config user.email \"<邮箱>\""
+    risk: safe
+    note: "默认只改本项目 .git/config；只有用户明确说「所有项目/全局」时才加 --global"
+
+  - group: "初始化与身份"
+    intent: "修改全局提交身份"
+    prompts: ["以后所有仓库都用这个身份", "全局改一下提交身份"]
+    command: "git config --global user.name \"<名字>\" && git config --global user.email \"<邮箱>\""
+    risk: caution
+    note: "影响所有仓库，执行前一句话说明"
+
+  - group: "初始化与身份"
+    intent: "关掉分页器 / 编辑器 / 中文转义"
+    prompts: ["别让 git log 卡在分页器里", "提交别弹编辑器", "中文文件名显示成八进制了"]
+    command: "git config core.pager cat && git config core.editor true && git config core.quotepath false"
+    risk: safe
+    note: "非 tty 下分页器默认已不启用，此处为保险；非交互命令本来就不会打开编辑器"
+
+  # ---------- 1. 日常提交 ----------
+  - group: "日常提交"
+    intent: "查看工作区改动"
+    prompts: ["现在有哪些改动", "看看工作区状态", "有什么没提交的"]
+    command: "git status --short"
+    risk: safe
+
+  - group: "日常提交"
+    intent: "带分支的简版状态"
+    prompts: ["当前在哪个分支、改动几条"]
+    command: "git status --porcelain=v1 -b"
+    risk: safe
+
+  - group: "日常提交"
+    intent: "提交全部改动"
+    prompts: ["提交一下", "把改动都提交了"]
+    command: "git status --short && git add -A && git commit -m \"<信息>\""
+    risk: safe
+    note: "先扫 defaults.red_lines：敏感配置/打包产物/大文件命中就拦下；不加 --no-verify"
+
+  - group: "日常提交"
+    intent: "只提交指定文件"
+    prompts: ["只提交 src/main.py，信息写：修复密码校验", "提交 config/app.ini 和 main.py 这两个文件"]
+    command: "git add <file> ... && git commit -m \"<信息>\""
+    risk: safe
+
+  - group: "日常提交"
+    intent: "只提交已跟踪文件"
+    prompts: ["提交已跟踪的改动，别带上新文件"]
+    command: "git add -u && git commit -m \"<信息>\""
+    risk: safe
+
+  - group: "日常提交"
+    intent: "预演这次会提交哪些文件"
+    prompts: ["这次提交会带上哪些文件", "先看看会 add 什么"]
+    command: "git add -n ."
+    risk: safe
+
+  - group: "日常提交"
+    intent: "查看暂存区内容"
+    prompts: ["暂存区里现在有哪些文件", "我 add 了什么"]
+    command: "git --no-pager diff --cached --stat"
+    risk: safe
+
+  - group: "日常提交"
+    intent: "把文件移出暂存区（保留改动）"
+    prompts: ["把 config/app.ini 从暂存区拿出来，改动保留"]
+    command: "git restore --staged <file>"
+    risk: caution
+
+  - group: "日常提交"
+    intent: "修改上一条提交信息"
+    prompts: ["上条提交信息打错了，改成：XXX", "改一下最近那次提交说明"]
+    command: "git commit --amend -m \"<信息>\""
+    risk: history-rewrite
+    note: "WorkBuddy 内置约定优先新建提交，仅用户明确要求改上一条时用；已推送则改用新提交或 revert"
+
+  - group: "日常提交"
+    intent: "把漏掉的文件补进上一条提交"
+    prompts: ["忘了把 docs/notes.md 加进去，补到上一条提交里"]
+    command: "git add <file> && git commit --amend --no-edit"
+    risk: history-rewrite
+    note: "同上：仅用户明确要求时用；已推送不得改写"
+
+  # ---------- 2. 查看历史与对比 ----------
+  - group: "查看历史与对比"
+    intent: "列出提交历史"
+    prompts: ["看提交历史", "改过哪些版本"]
+    command: "git --no-pager log --oneline -n 20"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "图形化查看历史"
+    prompts: ["用图看看分支历史", "把历史画成图"]
+    command: "git --no-pager log --oneline --graph --all -n 30"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "查看上一条提交的具体改动"
+    prompts: ["上次那条提交具体动了哪些行", "上一条提交都改了什么"]
+    command: "git --no-pager show HEAD"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "查看未提交改动"
+    prompts: ["还没提交的改动逐行列出来", "现在改了哪些行"]
+    command: "git --no-pager diff"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "单文件工作区对比"
+    prompts: ["src/main.py 相比上条提交改了什么"]
+    command: "git --no-pager diff -- <file>"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "查看某文件完整变更历史"
+    prompts: ["src/main.py 被改过几次，每次都改了什么", "这个文件的历史"]
+    command: "git --no-pager log --follow -p -- <file>"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "查某几行的来历"
+    prompts: ["第 120 行是谁什么时候改的", "这段代码谁写的"]
+    command: "git --no-pager blame -L <起始行>,<结束行> <file>"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "按关键词搜提交"
+    prompts: ["哪条提交里提到过 密码", "搜一下涉及 XXX 的提交"]
+    command: "git --no-pager log --grep=\"<关键词>\" --oneline"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "搜某段代码何时被加入"
+    prompts: ["什么时候加进来的 DelaySeconds", "哪次提交引入了这个函数"]
+    command: "git --no-pager log -S \"<文本>\" --oneline"
+    risk: safe
+
+  - group: "查看历史与对比"
+    intent: "统计某文件主要谁在改"
+    prompts: ["这个文件主要谁在改", "按作者统计提交数"]
+    command: "git --no-pager shortlog -sn -- <file>"
+    risk: safe
+
+  # ---------- 3. 回退与撤销 ----------
+  - group: "回退与撤销"
+    intent: "丢弃单个文件的未提交改动"
+    prompts: ["把 src/main.py 恢复到上次提交的样子", "这个文件改坏了，还原"]
+    command: "git restore <file>"
+    risk: destructive
+
+  - group: "回退与撤销"
+    intent: "丢弃全部未提交改动"
+    prompts: ["全部未提交的改动都不要了", "把工作区整个还原"]
+    command: "git restore ."
+    risk: destructive
+    note: "不影响未跟踪的新文件；要连新文件一起清走见下一条 git clean"
+
+  - group: "回退与撤销"
+    intent: "连未跟踪新文件一起清掉"
+    prompts: ["未跟踪的新文件也一起删掉", "彻底清空工作区"]
+    command: "git clean -n && git clean -fd"
+    risk: destructive
+    note: "必须先跑 -n 预演并把清单列给用户确认后再执行 -fd"
+
+  - group: "回退与撤销"
+    intent: "撤销提交但保留改动"
+    prompts: ["撤掉最近一条提交，代码改动留着", "上一条提交先撤了，代码别丢"]
+    command: "git reset --soft HEAD~1"
+    risk: destructive
+
+  - group: "回退与撤销"
+    intent: "撤销提交且不保留暂存"
+    prompts: ["撤掉最近一条提交，改动留在工作区不暂存"]
+    command: "git reset HEAD~1"
+    risk: destructive
+
+  - group: "回退与撤销"
+    intent: "彻底回退到更早提交"
+    prompts: ["彻底回到 3 条提交之前，改动都不要"]
+    command: "git reset --hard HEAD~<N>"
+    risk: destructive
+    note: "已推送的历史优先改用 git revert，不要 --hard 后强推"
+
+  - group: "回退与撤销"
+    intent: "用反向提交安全撤销（已推送场景首选）"
+    prompts: ["v1.0 那条提交有问题，用反向提交撤掉它", "已经推上去的提交别改历史，生成一条反向提交"]
+    command: "git revert <hash>"
+    risk: caution
+
+  - group: "回退与撤销"
+    intent: "找回被 reset 丢掉的提交"
+    prompts: ["不小心 reset 丢了提交，帮我找回来", "刚才的提交不见了"]
+    command: "git --no-pager reflog && git reset --hard HEAD@{<n>}"
+    risk: destructive
+    note: "先只读跑 reflog 给用户看，确认序号后再执行 reset"
+
+  - group: "回退与撤销"
+    intent: "找回误删的文件"
+    prompts: ["不小心删了 src/main.py，从上次提交找回来"]
+    command: "git restore <file>"
+    risk: safe
+
+  - group: "回退与撤销"
+    intent: "从更早的提交取出文件"
+    prompts: ["把上次提交里的 config 拿回来"]
+    command: "git restore --source=HEAD~1 -- <file>"
+    risk: safe
+
+  # ---------- 4. 分支 ----------
+  - group: "分支"
+    intent: "新建并切换到分支"
+    prompts: ["开个实验分支 test-ui", "新建分支并切过去"]
+    command: "git switch -c <branch>"
+    risk: safe
+
+  - group: "分支"
+    intent: "切换分支"
+    prompts: ["切回 main", "切到 test-ui 分支"]
+    command: "git switch <branch>"
+    risk: safe
+
+  - group: "分支"
+    intent: "列出分支"
+    prompts: ["现在有哪些分支", "列一下分支"]
+    command: "git branch -a"
+    risk: safe
+
+  - group: "分支"
+    intent: "合并分支"
+    prompts: ["把 test-ui 合回 main", "把这个分支合进主线"]
+    command: "git switch main && git merge <branch>"
+    risk: caution
+
+  - group: "分支"
+    intent: "处理合并冲突"
+    prompts: ["有冲突了，帮我分析怎么选", "冲突怎么解决"]
+    command: "读 git status 与冲突文件的 diff，逐个冲突列出可选方案后再改"
+    risk: caution
+    note: "改完 git add 冲突文件 && git commit -m \"<信息>\" 完成合并；拿不准就用询问工具让用户选哪边"
+
+  - group: "分支"
+    intent: "删除已合并分支"
+    prompts: ["test-ui 合并完了删掉它"]
+    command: "git branch -d <branch>"
+    risk: caution
+
+  - group: "分支"
+    intent: "强删未合并分支"
+    prompts: ["那个分支不要了直接删", "扔掉这个分支"]
+    command: "git branch -D <branch>"
+    risk: destructive
+
+  - group: "分支"
+    intent: "重命名分支"
+    prompts: ["把分支 a 改名叫 b"]
+    command: "git branch -m <旧名> <新名>"
+    risk: safe
+
+  - group: "分支"
+    intent: "只摘取某一条提交"
+    prompts: ["把 test-ui 上那条 修复密码校验 摘到 main"]
+    command: "git cherry-pick <hash>"
+    risk: caution
+
+  - group: "分支"
+    intent: "变基到最新主线"
+    prompts: ["把 test-ui 变基到 main 最新上"]
+    command: "git rebase <base>"
+    risk: history-rewrite
+
+  - group: "分支"
+    intent: "压缩多条提交为一条（无交互）"
+    prompts: ["把最近 3 条零碎提交压成一条", "合并这几条提交"]
+    command: "git reset --soft HEAD~<N> && git commit -m \"<信息>\""
+    risk: history-rewrite
+    note: "禁止 git rebase -i（非交互环境会挂住）；用 reset --soft + 新提交达成同样效果"
+
+  - group: "分支"
+    intent: "中断变基"
+    prompts: ["变基卡住了，退回去"]
+    command: "git rebase --abort"
+    risk: caution
+
+  - group: "分支"
+    intent: "另开目录并行开发"
+    prompts: ["另开一个目录看别的分支"]
+    command: "git worktree add <路径> <branch>"
+    risk: caution
+
+  # ---------- 5. 暂存 stash ----------
+  - group: "暂存（stash）"
+    intent: "暂存当前改动（塞抽屉）"
+    prompts: ["手头改动先塞抽屉，我要干别的", "先存起来"]
+    command: "git stash push -m \"<说明>\""
+    risk: safe
+
+  - group: "暂存（stash）"
+    intent: "连未跟踪文件一起暂存"
+    prompts: ["新文件也一起塞进去"]
+    command: "git stash push -u -m \"<说明>\""
+    risk: safe
+
+  - group: "暂存（stash）"
+    intent: "查看暂存列表"
+    prompts: ["抽屉里有什么", "列出所有暂存"]
+    command: "git stash list"
+    risk: safe
+
+  - group: "暂存（stash）"
+    intent: "取出暂存并删除该记录"
+    prompts: ["取出暂存的改动"]
+    command: "git stash pop"
+    risk: caution
+
+  - group: "暂存（stash）"
+    intent: "取出暂存但保留记录"
+    prompts: ["取出暂存，抽屉留着"]
+    command: "git stash apply"
+    risk: safe
+
+  - group: "暂存（stash）"
+    intent: "删除指定暂存"
+    prompts: ["把第 2 个暂存扔掉"]
+    command: "git stash drop stash@{<n>}"
+    risk: destructive
+
+  - group: "暂存（stash）"
+    intent: "清空全部暂存"
+    prompts: ["抽屉全部清空"]
+    command: "git stash clear"
+    risk: destructive
+
+  # ---------- 6. 标签 ----------
+  - group: "标签"
+    intent: "创建带说明标签"
+    prompts: ["给现在版本打标签 v1.0"]
+    command: "git tag -a <vX> -m \"<说明>\""
+    risk: safe
+
+  - group: "标签"
+    intent: "列出标签"
+    prompts: ["现在有哪些标签"]
+    command: "git tag -n"
+    risk: safe
+
+  - group: "标签"
+    intent: "查看标签对应提交"
+    prompts: ["v1.0 对应哪次提交", "看看 v1.0 的内容"]
+    command: "git --no-pager show <vX>"
+    risk: safe
+
+  - group: "标签"
+    intent: "删除标签"
+    prompts: ["把标签 v1.0 删掉"]
+    command: "git tag -d <vX>"
+    risk: caution
+
+  - group: "标签"
+    intent: "推送标签"
+    prompts: ["把标签也推上远程", "把标签也推上 GitHub"]
+    command: "git push origin <vX>  或  git push --tags"
+    risk: caution
+
+  # ---------- 7. 忽略规则 ----------
+  - group: "忽略规则（.gitignore）"
+    intent: "新增忽略规则"
+    prompts: ["把 *.log 加进忽略列表"]
+    command: "编辑 .gitignore 追加规则 && git add .gitignore && git commit -m \"<信息>\""
+    risk: safe
+
+  - group: "忽略规则（.gitignore）"
+    intent: "让已跟踪文件退出跟踪（本地保留）"
+    prompts: ["config/app.ini 被跟踪了，移出版本库但本地保留"]
+    command: "git rm --cached <file> && 把该文件名加入 .gitignore && git commit -m \"<信息>\""
+    risk: caution
+
+  - group: "忽略规则（.gitignore）"
+    intent: "排查文件为何未被提交"
+    prompts: ["为什么 xxx 没被提交"]
+    command: "git check-ignore -v <file>"
+    risk: safe
+
+  # ---------- 8. 远程仓库 ----------
+  - group: "远程仓库"
+    intent: "关联远程仓库"
+    prompts: ["我的仓库地址是 https://... 连上它"]
+    command: "git remote add origin <URL>"
+    risk: safe
+
+  - group: "远程仓库"
+    intent: "查看远程配置"
+    prompts: ["现在连的哪个远程仓库"]
+    command: "git remote -v"
+    risk: safe
+
+  - group: "远程仓库"
+    intent: "推送到远程"
+    prompts: ["推上 GitHub", "上传到远程", "推上远程"]
+    command: "GIT_TERMINAL_PROMPT=0 git push"
+    risk: caution
+    note: "环境变量必须内联（不跨命令保留）；先确认分支名与上游；改用凭据管理器或 SSH"
+
+  - group: "远程仓库"
+    intent: "首次推送并设上游"
+    prompts: ["第一次推这个分支"]
+    command: "GIT_TERMINAL_PROMPT=0 git push -u origin HEAD"
+    risk: caution
+
+  - group: "远程仓库"
+    intent: "拉取远程最新"
+    prompts: ["拉取云端最新"]
+    command: "GIT_TERMINAL_PROMPT=0 git pull --ff-only"
+    risk: caution
+    note: "--ff-only 避免意外生成合并提交"
+
+  - group: "远程仓库"
+    intent: "只看远程动静不合并"
+    prompts: ["云端有什么新动静？先别拉"]
+    command: "GIT_TERMINAL_PROMPT=0 git fetch && git --no-pager log HEAD..@{u} --oneline"
+    risk: safe
+
+  - group: "远程仓库"
+    intent: "避免凭据交互弹窗"
+    prompts: ["别让它问我要密码", "推的时候别卡在登录上"]
+    command: "GIT_TERMINAL_PROMPT=0 <git 命令>（PowerShell 工具用 $env:GIT_TERMINAL_PROMPT='0'; git ...）"
+    risk: safe
+    note: "非交互环境弹凭据会失败或挂住；长期方案是凭据管理器或 SSH key"
+
+  - group: "远程仓库"
+    intent: "修改远程地址"
+    prompts: ["远程地址改到新的 URL"]
+    command: "git remote set-url origin <URL>"
+    risk: safe
+
+  - group: "远程仓库"
+    intent: "克隆仓库"
+    prompts: ["把 https://... 克隆到 D:\\某目录"]
+    command: "git clone <URL> <目录>"
+    risk: safe
+    note: "Windows 路径写 /d/某目录；耗时，走后台任务"
+
+  # ---------- 9. 其他 ----------
+  - group: "其他"
+    intent: "导出干净压缩包（不含 .git）"
+    prompts: ["把当前版本导出成 zip"]
+    command: "git archive --format=zip -o <名称>.zip HEAD"
+    risk: safe
+
+  - group: "其他"
+    intent: "提交前自动检查"
+    prompts: ["提交前自动检查 Python 语法", "加个 pre-commit 检查"]
+    command: "写 .git/hooks/pre-commit：python -m py_compile 改动过的 .py"
+    risk: safe
+    note: "不要加 --no-verify 绕过；hook 失败修根因"
+
+  - group: "其他"
+    intent: "引入另一个项目为子模块"
+    prompts: ["把 XX 项目作为子模块加进来"]
+    command: "git submodule add <URL> <路径>"
+    risk: caution
+
+  - group: "其他"
+    intent: "压缩整理仓库"
+    prompts: ["把仓库压缩整理一下"]
+    command: "git gc"
+    risk: safe
+    note: "耗时，走后台任务"
+
+  - group: "其他"
+    intent: "体检仓库对象"
+    prompts: ["仓库有没有坏对象"]
+    command: "git fsck --no-progress"
+    risk: safe
+
+  - group: "其他"
+    intent: "查看仓库体积"
+    prompts: ["仓库为什么这么大", "看看仓库多大"]
+    command: "git count-objects -vH"
+    risk: safe
+
+  - group: "其他"
+    intent: "找出历史里最大的文件"
+    prompts: ["找出历史里最大的文件", "揪出大文件"]
+    command: "git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | sort -k3 -n | tail -20"
+    risk: safe
+
+  # ---------- 10. WorkBuddy 场景专项 ----------
+  - group: "WorkBuddy 场景专项"
+    intent: "在子目录 / 子仓库里操作"
+    prompts: ["对某个子项目做 git 操作", "在那个子目录里看一下状态"]
+    command: "git -C <子目录> <子命令>（<子目录> 用绝对路径 /c/... /d/...）"
+    risk: safe
+    note: "工具没有 workdir 参数；不靠 cd；路径含空格加双引号"
+
+  - group: "WorkBuddy 场景专项"
+    intent: "提交前排雷与大文件预警"
+    prompts: ["提交前检查有没有不该进库的文件", "这次提交会不会带大文件"]
+    command: "先 git status --short，扫 node_modules/ dist/ build/ *.exe *.asar *.rar *.zip 与敏感配置；超 10MB 先提醒"
+    risk: safe
+
+  - group: "WorkBuddy 场景专项"
+    intent: "保护平台自身目录"
+    prompts: ["别把安装目录/配置目录提交进去"]
+    command: "平台安装目录（resources/app.asar 等）只读不入库；.workbuddy/ 是项目数据目录，不清理不删除，按需加进 .gitignore"
+    risk: safe
+
+  - group: "WorkBuddy 场景专项"
+    intent: "命令被权限策略拒绝"
+    prompts: ["提示没有权限", "刚才那条命令被拦了"]
+    command: "立即停止并向用户说明原因，不换工具或等价命令重试"
+    risk: safe
+
+  - group: "WorkBuddy 场景专项"
+    intent: "只看不动 / 先出计划"
+    prompts: ["先告诉我你会改哪些文件", "先别执行，只分析"]
+    command: "Ask 模式只读分析、Plan 模式先出计划；不执行任何写操作"
+    risk: safe
+
+  - group: "WorkBuddy 场景专项"
+    intent: "确认危险操作后再执行"
+    prompts: ["要清掉全部未提交改动", "确认一下再动手"]
+    command: "用询问工具列出受影响文件/提交范围，等用户确认后再执行，完成后 git status --short 回读校验"
+    risk: destructive

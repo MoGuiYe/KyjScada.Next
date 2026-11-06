@@ -1,0 +1,58 @@
+# ==========================================================
+#  KyjScada.Next .gitignore
+#  首次提交前补齐：只纳管源码 / 工程文件 / 文档
+#  编译产物、运行时数据、含明文口令的配置一律不入库
+# ==========================================================
+
+# --- .NET / MSBuild 编译产物 ---
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]uild/
+[Bb]ld/
+[Dd]ist/
+[Pp]ublish/
+artifacts/
+.vs/
+*.dll
+*.exe
+*.pdb
+*.cache
+*.obj
+*.ilk
+*.tlog
+*.log
+*.user
+*.suo
+*.userprefs
+project.assets.json
+project.nuget.cache
+*.nuget.props
+*.nuget.targets
+
+# --- 运行时数据 / 本地数据库（含 24MB history.db）---
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# --- 含明文口令或本地状态的本地配置 ---
+ScreenBlanker.ini
+**/data/*.ini
+appsettings.*.local.json
+*.secrets.json
+.env
+*.pfx
+
+# --- WorkBuddy 项目数据目录（不清理、不删除，仅不入库）---
+.workbuddy/
+
+# --- 操作系统垃圾文件 ---
+Thumbs.db
+.DS_Store
+desktop.ini

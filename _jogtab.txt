@@ -1,0 +1,68 @@
+    <TabItem Header="急停/点动" Background="#1E1E2E" Foreground="#CDD6F4" FontSize="14">
+                <Grid Background="#181825" Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 急停区 -->
+                    <Border Grid.Row="0" Background="#3B0D0D" Padding="12" Margin="0,0,0,10"
+                            BorderBrush="#7F1D1D" BorderThickness="1">
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="EstopBtn" Content="■ 急停" Width="130" Height="52" FontSize="20" FontWeight="Bold"
+                                    Click="OnEstop" Background="#DC2626" Foreground="White"
+                                    BorderBrush="#991B1B" BorderThickness="2"/>
+                            <TextBlock x:Name="EstopHintText" Text="急停:把急停变量写为动作值。需 CanForce 权限且写入已启用。"
+                                       Foreground="#FCA5A5" Margin="16,0,0,0" VerticalAlignment="Center"
+                                       FontSize="12" TextWrapping="Wrap" MaxWidth="560"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 点动区 -->
+                    <Border Grid.Row="1" Background="#1E1E2E" Padding="12" Margin="0,0,0,10">
+                        <StackPanel>
+                            <WrapPanel>
+                                <Button Content="点动开" Width="96" Height="40" FontSize="15" Click="OnJogOn"
+                                        Background="#313244" Foreground="#CDD6F4" BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="点动关" Width="96" Height="40" FontSize="15" Margin="10,0,0,0" Click="OnJogOff"
+                                        Background="#313244" Foreground="#CDD6F4" BorderBrush="#45475A" BorderThickness="1"/>
+                                <TextBlock Text="目标变量:" Foreground="#A6ADC8" Margin="20,0,6,0" VerticalAlignment="Center" FontSize="12"/>
+                                <ComboBox x:Name="JogVarBox" Width="220" Height="28" Background="#11111B" Foreground="#CDD6F4"
+                                          BorderBrush="#45475A"/>
+                                <TextBlock Text="强制值:" Foreground="#A6ADC8" Margin="20,0,6,0" VerticalAlignment="Center" FontSize="12"/>
+                                <TextBox x:Name="ForceValueBox" Width="80" Height="28" Text="1"
+                                         Background="#11111B" Foreground="#CDD6F4" BorderBrush="#45475A" Padding="4,2"/>
+                                <Button Content="强制写入" Width="96" Height="28" Margin="10,0,0,0" Click="OnForceWrite"
+                                        Background="#313244" Foreground="#CDD6F4" BorderBrush="#45475A" BorderThickness="1"/>
+                            </WrapPanel>
+                            <TextBlock x:Name="JogHintText" Text="点动/强制需 CanJog / CanForce 权限。写入走与参数设置相同的命令闸门(串行化+限速+审计)。"
+                                       Foreground="#585B70" Margin="0,8,0,0" FontSize="11" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 可写 Bool 点清单 -->
+                    <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="0,0,0,8">
+                        <TextBlock x:Name="JogInfoText" Text="可写 Bool 点:加载中..." Foreground="#A6ADC8" FontSize="12"/>
+                    </Border>
+
+                    <DataGrid Grid.Row="3" x:Name="JogGrid"
+                              AutoGenerateColumns="False" IsReadOnly="True"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                              Background="#181825" RowBackground="#1E1E2E"
+                              AlternatingRowBackground="#181825" Foreground="#CDD6F4"
+                              BorderThickness="0" FontSize="12">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="组" Binding="{Binding GroupName}" Width="110"/>
+                            <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
+                            <DataGridTextColumn Header="类型" Binding="{Binding VarType}" Width="80"/>
+                            <DataGridTextColumn Header="当前值" Binding="{Binding CurrentText}" Width="110"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <TextBlock Grid.Row="4" x:Name="JogResultText" Text="" Foreground="#F9E2AF"
+                               FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                </Grid>
+            <

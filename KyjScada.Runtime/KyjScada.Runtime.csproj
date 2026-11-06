@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KyjScada.Contracts\KyjScada.Contracts.csproj" />
+    <!-- Runtime 需要 Domain(报警状态机 + 配置模型)。依赖仍向下,不成环。 -->
+    <ProjectReference Include="..\KyjScada.Domain\KyjScada.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

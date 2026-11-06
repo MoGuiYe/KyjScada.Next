@@ -1,0 +1,1000 @@
+﻿<Window x:Class="KyjScada.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:KyjScada.App"
+        Title="KyjScada 实时监控" Height="720" Width="1280"
+        WindowState="Maximized" MinWidth="1024" MinHeight="640">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部状态栏 -->
+        <!-- DockPanel:右侧按钮组先占位,左侧的标题/状态/设备再吃剩下的宽度。
+             原来是一整条水平 StackPanel,设备名 + 权限文本会把它撑到 2000+ px,
+             1280 宽的窗口上「用户管理 / 系统设置 / 注销」被推到屏幕外面点不到。 -->
+        <Border Grid.Row="0" Background="#1E1E2E" Padding="12">
+            <DockPanel LastChildFill="False">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button x:Name="ConfigEditorBtn" Content="配置编辑器" Width="90" Height="26"
+                            VerticalAlignment="Center" Click="OnOpenConfigEditor" IsEnabled="False"
+                            Background="#313244" Foreground="#FFFFFF"
+                            BorderBrush="#45475A" BorderThickness="1"/>
+
+                    <TextBlock x:Name="UserText" Text="未登录" Foreground="#F9E2AF"
+                               Margin="14,0,6,0" VerticalAlignment="Center" FontSize="12"
+                               MaxWidth="160" TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                    <Button x:Name="LoginBtn" Content="登录" Width="60" Height="26"
+                            VerticalAlignment="Center" Click="OnLoginClick"
+                            Background="#313244" Foreground="#FFFFFF"
+                            BorderBrush="#45475A" BorderThickness="1"/>
+
+                    <Button x:Name="UserManageBtn" Content="用户管理" Width="78" Height="26"
+                            Margin="8,0,0,0" VerticalAlignment="Center"
+                            Click="OnOpenUserManage" IsEnabled="False"
+                            Background="#313244" Foreground="#FFFFFF"
+                            BorderBrush="#45475A" BorderThickness="1"/>
+
+                    <Button x:Name="SystemSettingsBtn" Content="系统设置" Width="78" Height="26"
+                            Margin="8,0,0,0" VerticalAlignment="Center"
+                            Click="OnOpenSystemSettings" IsEnabled="False"
+                            Background="#313244" Foreground="#FFFFFF"
+                            BorderBrush="#45475A" BorderThickness="1"/>
+                </StackPanel>
+
+                <!-- 左侧:宽度不够就用省略号,不再挤出右侧按钮 -->
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="KyjScada" Foreground="#FFFFFF" FontSize="20" FontWeight="Bold" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="StatusText" Text="未连接" Foreground="#F38BA8" Margin="12,0,0,0" VerticalAlignment="Center" FontSize="14"/>
+                    <TextBlock x:Name="DeviceText" Text="" Foreground="#C6CDE0" Margin="18,0,0,0" VerticalAlignment="Center" FontSize="14"
+                               MaxWidth="260" TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                    <TextBlock Text="字节序:" Foreground="#C6CDE0" Margin="12,0,4,0" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox x:Name="OrderBox" Width="80" VerticalAlignment="Center" SelectionChanged="OnOrderChanged">
+                        <ComboBoxItem Content="ABCD"/>
+                        <ComboBoxItem Content="BADC"/>
+                        <ComboBoxItem Content="CDAB"/>
+                        <ComboBoxItem Content="DCBA"/>
+                    </ComboBox>
+
+                    <TextBlock Text="设备:" Foreground="#C6CDE0" Margin="14,0,4,0" VerticalAlignment="Center" FontSize="13"/>
+                    <ComboBox x:Name="DeviceBox" Width="190" VerticalAlignment="Center"
+                              SelectionChanged="OnDeviceChanged"
+                              ToolTip="切换要监控的设备;协议由设备配置决定"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- 主体:实时监控 / 历史趋势 两个页签 -->
+        <TabControl Grid.Row="1" x:Name="MainTabs" Background="#181825" BorderThickness="0"
+                    Foreground="#FFFFFF" Padding="0">
+
+            <!-- ========== 页签一:实时监控 ========== -->
+            <TabItem Header="实时监控" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <DataGrid x:Name="ValueGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal" Background="#181825"
+                          RowBackground="#1E1E2E" AlternatingRowBackground="#181825" Foreground="#FFFFFF"
+                          BorderThickness="0">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="变量" Binding="{Binding Name}" Width="220"/>
+                        <DataGridTextColumn Header="值" Binding="{Binding ValueText}" Width="140"/>
+                        <DataGridTextColumn Header="单位" Binding="{Binding Unit}" Width="80"/>
+                        <DataGridTextColumn Header="质量" Binding="{Binding QualityText}" Width="100"/>
+                        <DataGridTextColumn Header="更新时间" Binding="{Binding TimeText}" Width="160"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </TabItem>
+
+            <!-- ========== 页签二:历史趋势 ========== -->
+            <TabItem Header="历史趋势" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <Grid Background="#181825">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="TrendLeftCol" Width="230"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- ===== 左面板:变量多选 ===== -->
+                    <Border Grid.Column="0" x:Name="TrendLeftPanel" Background="#1E1E2E"
+                            BorderBrush="#313244" BorderThickness="0,0,1,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Text="位号选择" Foreground="#FFFFFF"
+                                       FontSize="13" FontWeight="Bold" Margin="10,10,10,6"/>
+
+                            <TextBox Grid.Row="1" x:Name="TrendSearchBox" Margin="10,0,10,8"
+                                     Background="#181825" Foreground="#FFFFFF" BorderBrush="#45475A"
+                                     BorderThickness="1" Padding="4,3"
+                                     TextChanged="OnTrendSearchChanged" ToolTip="搜索变量名"/>
+
+                            <!-- 变量多选列表 -->
+                            <ListBox Grid.Row="2" x:Name="TrendVarList" Margin="6,0,6,0"
+                                     Background="#181825" Foreground="#FFFFFF"
+                                     BorderThickness="0" SelectionMode="Multiple"
+                                     SelectionChanged="OnTrendVarSelectionChanged">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Rectangle Width="10" Height="10" Margin="0,0,6,0"
+                                                       VerticalAlignment="Center">
+                                                <Rectangle.Fill>
+                                                    <SolidColorBrush Color="{Binding Color}"/>
+                                                </Rectangle.Fill>
+                                            </Rectangle>
+                                            <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+
+                            <StackPanel Grid.Row="3" Margin="10,8,10,10">
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="全选" Width="62" Height="24" Margin="0,0,6,0"
+                                            Click="OnTrendSelectAll" Background="#313244"
+                                            Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                    <Button Content="清空" Width="62" Height="24"
+                                            Click="OnTrendClearVarSelection" Background="#313244"
+                                            Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                </StackPanel>
+                                <TextBlock x:Name="TrendSelectedText" Text="未选择"
+                                           Foreground="#C6CDE0" FontSize="11" Margin="0,6,0,0"/>
+
+                                <Separator Background="#45475A" Margin="0,10,0,8"/>
+
+                                <TextBlock Text="分析模板" Foreground="#FFFFFF" FontSize="12"
+                                           FontWeight="Bold" Margin="0,0,0,4"/>
+                                <ComboBox x:Name="TrendTemplateBox" Height="24"
+                                          HorizontalAlignment="Stretch"
+                                          SelectionChanged="OnTrendTemplateSelected"/>
+                                <TextBox x:Name="TrendTemplateName" Height="24" Margin="0,6,0,0"
+                                         Background="#181825" Foreground="#FFFFFF"
+                                         BorderBrush="#45475A" BorderThickness="1" Padding="4,3"
+                                         ToolTip="模板名称"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <Button Content="保存" Width="62" Height="24" Margin="0,0,6,0"
+                                            Click="OnTrendTemplateSave" Background="#313244"
+                                            Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                    <Button Content="删除" Width="62" Height="24"
+                                            Click="OnTrendTemplateDelete" Background="#313244"
+                                            Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- ===== 右侧:查询栏 + 图表 ===== -->
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- 查询条件栏 -->
+                        <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
+                            <!-- 用 WrapPanel:控件多,窄窗口下自动换行,否则右侧按钮会被挤出去看不见 -->
+                            <WrapPanel Orientation="Horizontal">
+                                <TextBlock Text="范围:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="13"/>
+                                <ComboBox x:Name="TrendRangeBox" Width="130" Margin="6,0,0,0" VerticalAlignment="Center"
+                                          SelectionChanged="OnTrendRangeChanged">
+                                    <ComboBoxItem Content="最近 10 分钟"/>
+                                    <ComboBoxItem Content="最近 1 小时"/>
+                                    <ComboBoxItem Content="最近 6 小时"/>
+                                    <ComboBoxItem Content="最近 24 小时"/>
+                                    <ComboBoxItem Content="最近 7 天"/>
+                                    <ComboBoxItem Content="今天"/>
+                                    <ComboBoxItem Content="昨天"/>
+                                    <ComboBoxItem Content="本周"/>
+                                    <ComboBoxItem Content="上周"/>
+                                    <ComboBoxItem Content="本月"/>
+                                    <ComboBoxItem Content="上月"/>
+                                </ComboBox>
+
+                                <TextBlock Text="分辨率:" Foreground="#C6CDE0" Margin="14,0,4,0" VerticalAlignment="Center" FontSize="13"/>
+                                <ComboBox x:Name="TrendResBox" Width="96" VerticalAlignment="Center"
+                                          SelectionChanged="OnTrendResChanged">
+                                    <ComboBoxItem Content="自动"/>
+                                    <ComboBoxItem Content="原始值"/>
+                                    <ComboBoxItem Content="1 秒"/>
+                                    <ComboBoxItem Content="10 秒"/>
+                                    <ComboBoxItem Content="30 秒"/>
+                                    <ComboBoxItem Content="1 分钟"/>
+                                    <ComboBoxItem Content="5 分钟"/>
+                                    <ComboBoxItem Content="30 分钟"/>
+                                    <ComboBoxItem Content="1 小时"/>
+                                    <ComboBoxItem Content="1 天"/>
+                                </ComboBox>
+
+                                <TextBlock Text="聚合:" Foreground="#C6CDE0" Margin="14,0,4,0" VerticalAlignment="Center" FontSize="13"/>
+                                <ComboBox x:Name="TrendAggBox" Width="86" VerticalAlignment="Center"
+                                          SelectionChanged="OnTrendAggChanged">
+                                    <ComboBoxItem Content="平均值"/>
+                                    <ComboBoxItem Content="最小值"/>
+                                    <ComboBoxItem Content="最大值"/>
+                                    <ComboBoxItem Content="首值"/>
+                                    <ComboBoxItem Content="末值"/>
+                                    <ComboBoxItem Content="求和"/>
+                                </ComboBox>
+
+                                <Button x:Name="TrendQueryBtn" Content="查询" Width="70" Height="26" Margin="14,0,0,0"
+                                        VerticalAlignment="Center" Click="OnTrendQuery" Background="#313244"
+                                        Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <Rectangle Width="1" Height="20" Fill="#45475A" Margin="14,0"/>
+
+                                <Button Content="放大" Width="54" Height="26" VerticalAlignment="Center"
+                                        Click="OnTrendZoomIn" Background="#313244"
+                                        Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="缩小" Width="54" Height="26" Margin="6,0,0,0" VerticalAlignment="Center"
+                                        Click="OnTrendZoomOut" Background="#313244"
+                                        Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="复位" Width="54" Height="26" Margin="6,0,0,0" VerticalAlignment="Center"
+                                        Click="OnTrendResetView" Background="#313244"
+                                        Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button x:Name="LockRangeBtn" Content="锁定量程" Width="66" Height="26" Margin="6,0,0,0"
+                                        VerticalAlignment="Center" Click="OnTrendToggleLock"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="清除框选" Width="66" Height="26" Margin="6,0,0,0"
+                                        VerticalAlignment="Center" Click="OnTrendClearChartSelection"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="导出CSV" Width="70" Height="26" Margin="6,0,0,0"
+                                        VerticalAlignment="Center" Click="OnTrendExportCsv"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="导出PNG" Width="70" Height="26" Margin="6,0,0,0"
+                                        VerticalAlignment="Center" Click="OnTrendExportPng"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <Rectangle Width="1" Height="20" Fill="#45475A" Margin="12,0"/>
+
+                                <Button x:Name="TrendCancelBtn" Content="取消" Width="54" Height="26"
+                                        VerticalAlignment="Center" Click="OnTrendCancelQuery"
+                                        IsEnabled="False"
+                                        Background="#4B2A2A" Foreground="#FCA5A5"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <Button x:Name="TrendPanelBtn" Content="隐藏面板" Width="76" Height="26"
+                                        Margin="6,0,0,0" VerticalAlignment="Center"
+                                        Click="OnTrendTogglePanel"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <Button x:Name="TrendMaxBtn" Content="曲线最大化" Width="90" Height="26"
+                                        Margin="6,0,0,0" VerticalAlignment="Center"
+                                        Click="OnTrendToggleMaximize"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <CheckBox x:Name="ShowRawBox" Content="原始数据"
+                                          Foreground="#C6CDE0" FontSize="12" Margin="12,0,0,0"
+                                          VerticalAlignment="Center" IsChecked="False"
+                                          Checked="OnShowRawChanged" Unchecked="OnShowRawChanged"/>
+
+                                <Rectangle Width="1" Height="20" Fill="#45475A" Margin="14,0"/>
+
+                                <!-- 默认不勾选:量程小时限值线会把曲线压得看不清 -->
+                                <CheckBox x:Name="ShowLimitsBox" Content="显示上下限"
+                                          Foreground="#C6CDE0" FontSize="12"
+                                          VerticalAlignment="Center" IsChecked="False"
+                                          Checked="OnShowLimitsChanged" Unchecked="OnShowLimitsChanged"/>
+
+                                <!-- 默认勾选:聚合后尖峰会被抹平,必须用包络还原波动范围 -->
+                                <CheckBox x:Name="ShowEnvelopeBox" Content="包络"
+                                          Foreground="#C6CDE0" FontSize="12" Margin="12,0,0,0"
+                                          VerticalAlignment="Center" IsChecked="True"
+                                          Checked="OnShowEnvelopeChanged" Unchecked="OnShowEnvelopeChanged"/>
+
+                                <CheckBox x:Name="ShowEventsBox" Content="报警事件"
+                                          Foreground="#C6CDE0" FontSize="12" Margin="12,0,0,0"
+                                          VerticalAlignment="Center" IsChecked="True"
+                                          Checked="OnShowEventsChanged" Unchecked="OnShowEventsChanged"/>
+
+                                <ComboBox x:Name="TrendModeBox" Width="78" Margin="12,0,0,0"
+                                          VerticalAlignment="Center"
+                                          SelectionChanged="OnTrendModeChanged">
+                                    <ComboBoxItem Content="叠加"/>
+                                    <ComboBoxItem Content="分屏"/>
+                                </ComboBox>
+
+                                <TextBlock x:Name="TrendInfoText" Text="" Foreground="#C6CDE0"
+                                           Margin="18,0,0,0" VerticalAlignment="Center" FontSize="12"/>
+                            </WrapPanel>
+                        </Border>
+
+                        <!-- 曲线控件 -->
+                        <Border Grid.Row="1" Margin="10,10,10,4" BorderBrush="#313244" BorderThickness="1">
+                            <local:TrendChartControl x:Name="TrendChart"/>
+                        </Border>
+
+                        <!-- 光标读数 + 操作提示 -->
+                        <Border Grid.Row="2" x:Name="TrendCursorBar" Background="#1E1E2E"
+                                Padding="10,6" Margin="10,0,10,4">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="光标" Foreground="#C6CDE0" FontSize="11" Margin="0,0,10,0"/>
+                                    <ItemsControl x:Name="TrendCursorPanel">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <StackPanel Orientation="Horizontal"/>
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
+                                                    <Rectangle Width="8" Height="8" Margin="0,0,5,0"
+                                                               VerticalAlignment="Center">
+                                                        <Rectangle.Fill>
+                                                            <SolidColorBrush Color="{Binding Color}"/>
+                                                        </Rectangle.Fill>
+                                                    </Rectangle>
+                                                    <TextBlock Text="{Binding Label}" Foreground="#C6CDE0" FontSize="11"/>
+                                                    <TextBlock Text="{Binding Value}" Foreground="#FFFFFF"
+                                                               FontSize="11" FontWeight="Bold" Margin="5,0,0,0"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                                <TextBlock x:Name="TrendHintText"
+                                           Text="操作:滚轮缩放 · 拖拽平移 · Shift+拖拽框选区间统计 · 双击复位 · 鼠标移动读光标处数值"
+                                           Foreground="#8C93AB" FontSize="11" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 底部统计 + 事件列表 -->
+                        <Border Grid.Row="3" x:Name="TrendBottomPanel" Background="#1E1E2E"
+                                Padding="8" Margin="10,0,10,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="320"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Grid.Column="0" x:Name="TrendStatsText" Text=""
+                                           Foreground="#C6CDE0" FontSize="12" TextWrapping="Wrap"
+                                           VerticalAlignment="Top"/>
+
+                                <Grid Grid.Column="1">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" x:Name="TrendEventHeader" Text="报警事件"
+                                               Foreground="#FFFFFF" FontSize="11" FontWeight="Bold"
+                                               Margin="10,0,0,4"/>
+
+                                    <ListBox Grid.Row="1" x:Name="TrendEventList" Height="72"
+                                             Background="#181825" Foreground="#FFFFFF"
+                                             BorderBrush="#313244" BorderThickness="1"
+                                             SelectionChanged="OnTrendEventSelected"
+                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding TimeText}" Foreground="#C6CDE0"
+                                                               FontSize="11" Width="66"/>
+                                                    <TextBlock Text="{Binding Text}" Foreground="#FCA5A5"
+                                                               FontSize="11"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                </Grid>
+                            </Grid>
+                        </Border>
+
+                        <!-- 原始数据预览(默认折叠,勾「原始数据」展开) -->
+                        <Border Grid.Row="4" x:Name="TrendRawPanel" Background="#1E1E2E"
+                                Padding="8" Margin="10,0,10,10" Visibility="Collapsed">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Row="0" x:Name="TrendRawHeader" Text="原始数据"
+                                           Foreground="#FFFFFF" FontSize="11" FontWeight="Bold"
+                                           Margin="0,0,0,4"/>
+
+                                <DataGrid Grid.Row="1" x:Name="TrendRawGrid" Height="130"
+                                          AutoGenerateColumns="True" IsReadOnly="True"
+                                          HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal"
+                                          Background="#181825" RowBackground="#1E1E2E"
+                                          AlternatingRowBackground="#181825" Foreground="#FFFFFF"
+                                          BorderThickness="0" FontSize="11"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- ========== 页签三:报警 ========== -->
+            <TabItem Header="报警" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <Grid Background="#181825">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 工具栏 -->
+                    <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
+                        <WrapPanel Orientation="Horizontal">
+                            <TextBlock Text="范围:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="13"/>
+                            <ComboBox x:Name="AlarmRangeBox" Width="120" Margin="6,0,0,0"
+                                      VerticalAlignment="Center"
+                                      SelectionChanged="OnAlarmRangeChanged">
+                                <ComboBoxItem Content="最近 1 小时"/>
+                                <ComboBoxItem Content="最近 24 小时"/>
+                                <ComboBoxItem Content="最近 7 天"/>
+                                <ComboBoxItem Content="全部"/>
+                            </ComboBox>
+
+                            <TextBlock Text="变量:" Foreground="#C6CDE0" Margin="14,0,4,0"
+                                       VerticalAlignment="Center" FontSize="13"/>
+                            <TextBox x:Name="AlarmSearchBox" Width="140" VerticalAlignment="Center"
+                                     Background="#181825" Foreground="#FFFFFF" BorderBrush="#45475A"
+                                     BorderThickness="1" Padding="4,3"
+                                     TextChanged="OnAlarmSearchChanged"/>
+
+                            <Button Content="刷新" Width="56" Height="26" Margin="12,0,0,0"
+                                    VerticalAlignment="Center" Click="OnAlarmRefresh"
+                                    Background="#313244" Foreground="#FFFFFF"
+                                    BorderBrush="#45475A" BorderThickness="1"/>
+
+                            <Rectangle Width="1" Height="20" Fill="#45475A" Margin="12,0"/>
+
+                            <Button x:Name="AlarmAckSelectedBtn" Content="确认选中" Width="72" Height="26" VerticalAlignment="Center"
+                                    Click="OnAlarmAckSelected" IsEnabled="False"
+                                    Background="#313244" Foreground="#FFFFFF"
+                                    BorderBrush="#45475A" BorderThickness="1"/>
+                            <Button x:Name="AlarmAckAllBtn" Content="全部确认" Width="72" Height="26" Margin="6,0,0,0"
+                                    VerticalAlignment="Center" Click="OnAlarmAckAll" IsEnabled="False"
+                                    Background="#313244" Foreground="#FFFFFF"
+                                    BorderBrush="#45475A" BorderThickness="1"/>
+
+                            <TextBlock x:Name="AlarmPageInfo" Text="" Foreground="#C6CDE0"
+                                       Margin="16,0,0,0" VerticalAlignment="Center" FontSize="12"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <!-- 当前报警(实时) -->
+                    <Border Grid.Row="1" Background="#1E1E2E" Padding="8" Margin="10,10,10,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" x:Name="ActiveAlarmHeader" Text="当前报警"
+                                       Foreground="#FFFFFF" FontSize="12" FontWeight="Bold"
+                                       Margin="0,0,0,4"/>
+
+                            <ListBox Grid.Row="1" x:Name="ActiveAlarmList" Height="76"
+                                     Background="#181825" Foreground="#FCA5A5"
+                                     BorderBrush="#313244" BorderThickness="1"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding VarName}" Width="150" FontSize="11"
+                                                       Foreground="#FCA5A5"/>
+                                            <TextBlock Text="{Binding DirectionText}" Width="50" FontSize="11"
+                                                       Foreground="#C6CDE0"/>
+                                            <TextBlock Text="{Binding ValueText}" Width="90" FontSize="11"
+                                                       Foreground="#FFFFFF"/>
+                                            <TextBlock Text="{Binding ThresholdText}" Width="110" FontSize="11"
+                                                       Foreground="#C6CDE0"/>
+                                            <TextBlock Text="{Binding DurationText}" Width="110" FontSize="11"
+                                                       Foreground="#F9E2AF"/>
+                                            <TextBlock Text="{Binding Note}" FontSize="11"
+                                                       Foreground="#8C93AB"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </Border>
+
+                    <!-- 历史报警 -->
+                    <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="10,8,10,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" x:Name="AlarmHistoryHeader" Text="历史报警"
+                                       Foreground="#FFFFFF" FontSize="12" FontWeight="Bold"
+                                       Margin="0,0,0,4"/>
+
+                            <DataGrid Grid.Row="1" x:Name="AlarmHistoryGrid"
+                                      AutoGenerateColumns="False" IsReadOnly="True"
+                                      SelectionMode="Extended"
+                                      HeadersVisibility="Column"
+                                      GridLinesVisibility="Horizontal"
+                                      Background="#181825" RowBackground="#1E1E2E"
+                                      AlternatingRowBackground="#181825" Foreground="#FFFFFF"
+                                      BorderThickness="0" FontSize="12">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="时间" Binding="{Binding TimeText}" Width="150"/>
+                                    <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
+                                    <DataGridTextColumn Header="类型" Binding="{Binding TypeText}" Width="70"/>
+                                    <DataGridTextColumn Header="方向" Binding="{Binding DirectionText}" Width="70"/>
+                                    <DataGridTextColumn Header="值" Binding="{Binding ValueText}" Width="110"/>
+                                    <DataGridTextColumn Header="状态" Binding="{Binding AckText}" Width="90"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Border>
+
+                    <!-- 底部提示 -->
+                    <Border Grid.Row="3" Background="#1E1E2E" Padding="8" Margin="10,8,10,10">
+                        <TextBlock x:Name="AlarmFooterText" Text="" Foreground="#C6CDE0" FontSize="12"
+                                   TextWrapping="Wrap"/>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <!-- ========== 页签四:实时趋势 ========== -->
+            <TabItem Header="实时趋势" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <Grid Background="#181825">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="LiveLeftCol" Width="230"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 左:变量多选(全部变量,不限归档) -->
+                    <Border Grid.Column="0" Background="#1E1E2E" BorderBrush="#313244" BorderThickness="0,0,1,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Text="位号选择(实时)" Foreground="#FFFFFF"
+                                       FontSize="13" FontWeight="Bold" Margin="10,10,10,6"/>
+
+                            <TextBox Grid.Row="1" x:Name="LiveSearchBox" Margin="10,0,10,8"
+                                     Background="#181825" Foreground="#FFFFFF" BorderBrush="#45475A"
+                                     BorderThickness="1" Padding="4,3"
+                                     TextChanged="OnLiveSearchChanged" ToolTip="搜索变量名"/>
+
+                            <ListBox Grid.Row="2" x:Name="LiveVarList" Margin="6,0,6,0"
+                                     Background="#181825" Foreground="#FFFFFF"
+                                     BorderThickness="0" SelectionMode="Multiple"
+                                     SelectionChanged="OnLiveVarSelectionChanged">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Rectangle Width="10" Height="10" Margin="0,0,6,0"
+                                                       VerticalAlignment="Center">
+                                                <Rectangle.Fill>
+                                                    <SolidColorBrush Color="{Binding Color}"/>
+                                                </Rectangle.Fill>
+                                            </Rectangle>
+                                            <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+
+                            <StackPanel Grid.Row="3" Margin="10,8,10,10">
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="全选" Width="62" Height="24" Margin="0,0,6,0"
+                                            Click="OnLiveSelectAll" Background="#313244"
+                                            Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                    <Button Content="清空" Width="62" Height="24"
+                                            Click="OnLiveClearVars" Background="#313244"
+                                            Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                </StackPanel>
+                                <TextBlock x:Name="LiveSelectedText" Text="未选择"
+                                           Foreground="#C6CDE0" FontSize="11" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- 右:工具条 + 曲线 + 光标读数 -->
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
+                            <WrapPanel Orientation="Horizontal">
+                                <TextBlock Text="窗口:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="13"/>
+                                <ComboBox x:Name="LiveWindowBox" Width="110" Margin="6,0,0,0"
+                                          VerticalAlignment="Center"
+                                          SelectionChanged="OnLiveWindowChanged">
+                                    <ComboBoxItem Content="1 分钟"/>
+                                    <ComboBoxItem Content="5 分钟"/>
+                                    <ComboBoxItem Content="15 分钟"/>
+                                    <ComboBoxItem Content="30 分钟"/>
+                                    <ComboBoxItem Content="60 分钟"/>
+                                </ComboBox>
+
+                                <Button x:Name="LivePauseBtn" Content="暂停" Width="66" Height="26"
+                                        Margin="14,0,0,0" VerticalAlignment="Center"
+                                        Click="OnLiveTogglePause"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <Button Content="清空" Width="62" Height="26" Margin="6,0,0,0"
+                                        VerticalAlignment="Center" Click="OnLiveClearData"
+                                        Background="#313244" Foreground="#FFFFFF"
+                                        BorderBrush="#45475A" BorderThickness="1"/>
+
+                                <Rectangle Width="1" Height="20" Fill="#45475A" Margin="12,0"/>
+
+                                <ComboBox x:Name="LiveModeBox" Width="78" VerticalAlignment="Center"
+                                          SelectionChanged="OnLiveModeChanged">
+                                    <ComboBoxItem Content="叠加"/>
+                                    <ComboBoxItem Content="分屏"/>
+                                </ComboBox>
+
+                                <TextBlock x:Name="LiveInfoText" Text="" Foreground="#C6CDE0"
+                                           Margin="16,0,0,0" VerticalAlignment="Center" FontSize="12"/>
+                            </WrapPanel>
+                        </Border>
+
+                        <Border Grid.Row="1" Margin="10,10,10,4" BorderBrush="#313244" BorderThickness="1">
+                            <local:TrendChartControl x:Name="LiveChart"/>
+                        </Border>
+
+                        <Border Grid.Row="2" Background="#1E1E2E" Padding="10,6" Margin="10,0,10,10">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="当前值" Foreground="#C6CDE0" FontSize="11" Margin="0,0,10,0"/>
+                                    <ItemsControl x:Name="LiveValuePanel">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel Orientation="Horizontal"/>
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
+                                                    <Rectangle Width="8" Height="8" Margin="0,0,5,0"
+                                                               VerticalAlignment="Center">
+                                                        <Rectangle.Fill>
+                                                            <SolidColorBrush Color="{Binding Color}"/>
+                                                        </Rectangle.Fill>
+                                                    </Rectangle>
+                                                    <TextBlock Text="{Binding Label}" Foreground="#C6CDE0" FontSize="11"/>
+                                                    <TextBlock Text="{Binding Value}" Foreground="#FFFFFF"
+                                                               FontSize="11" FontWeight="Bold" Margin="5,0,0,0"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                                <TextBlock Text="操作:滚轮缩放会暂停跟随 · 拖拽平移 · 双击复位并恢复跟随"
+                                           Foreground="#8C93AB" FontSize="11" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </TabItem>
+<!-- ========== 页签五:参数设置(写入) ========== -->
+            <TabItem Header="参数设置" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <Grid Background="#181825">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
+                        <WrapPanel Orientation="Horizontal">
+                            <CheckBox x:Name="WriteEnableBox" Content="允许写入(授权)"
+                                      Foreground="#F9E2AF" FontSize="13" FontWeight="Bold"
+                                      VerticalAlignment="Center"
+                                      Checked="OnWriteEnableChanged" Unchecked="OnWriteEnableChanged"/>
+
+                            <TextBlock x:Name="WriteInfoText" Text="" Foreground="#C6CDE0"
+                                       Margin="16,0,0,0" VerticalAlignment="Center" FontSize="12"/>
+
+                            <TextBlock Text="说明:写入经 CommandGate 校验(权限/可写区/类型/限速),每次写入都有审计记录。"
+                                       Foreground="#8C93AB" FontSize="11" Margin="16,0,0,0"
+                                       VerticalAlignment="Center"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" Background="#181825" Margin="10,10,10,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="WriteList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="#1E1E2E" Padding="8,4" Margin="0,0,0,2">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="120"/>
+                                                    <ColumnDefinition Width="150"/>
+                                                    <ColumnDefinition Width="110"/>
+                                                    <ColumnDefinition Width="120"/>
+                                                    <ColumnDefinition Width="90"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+
+                                                <TextBlock Grid.Column="0" Text="{Binding GroupName}"
+                                                           Foreground="#8C93AB" FontSize="11"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="1" Text="{Binding VarName}"
+                                                           Foreground="#FFFFFF" FontSize="12"
+                                                           FontWeight="Bold" VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="2" Text="{Binding CurrentText}"
+                                                           Foreground="#89B4FA" FontSize="12"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBox Grid.Column="3" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                                         Background="#11111B" Foreground="#FFFFFF"
+                                                         BorderBrush="#45475A" BorderThickness="1"
+                                                         Padding="4,2" FontSize="12"
+                                                         VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="4" Text="{Binding Unit}"
+                                                           Foreground="#C6CDE0" FontSize="11"
+                                                           VerticalAlignment="Center"/>
+                                                <Button Grid.Column="5" Content="写入" Width="60" Height="24"
+                                                        HorizontalAlignment="Left"
+                                                        Tag="{Binding}"
+                                                        Click="OnWriteRow"
+                                                        Background="#2A3A2A" Foreground="#FFFFFF"
+                                                        BorderBrush="#45475A" BorderThickness="1"/>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Border>
+
+                    <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="10,8,10,10">
+                        <TextBlock x:Name="WriteResultText" Text="" Foreground="#C6CDE0"
+                                   FontSize="12" TextWrapping="Wrap"/>
+                    </Border>
+                </Grid>
+            </TabItem>
+<!-- ========== 页签六:报表 ========== -->
+            <TabItem Header="报表" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <Grid Background="#181825">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 条件栏 -->
+                    <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
+                        <WrapPanel Orientation="Horizontal">
+                            <TextBlock Text="起" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="12"/>
+                            <TextBox x:Name="ReportFromBox" Width="152" Height="24" Margin="4,0,0,0"
+                                     VerticalAlignment="Center"
+                                     Background="#11111B" Foreground="#FFFFFF"
+                                     BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
+
+                            <TextBlock Text="止" Foreground="#C6CDE0" Margin="8,0,4,0"
+                                       VerticalAlignment="Center" FontSize="12"/>
+                            <TextBox x:Name="ReportToBox" Width="152" Height="24"
+                                     VerticalAlignment="Center"
+                                     Background="#11111B" Foreground="#FFFFFF"
+                                     BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
+
+                            <TextBlock Text="粒度:" Foreground="#C6CDE0" Margin="14,0,4,0"
+                                       VerticalAlignment="Center" FontSize="12"/>
+                            <ComboBox x:Name="ReportGrainBox" Width="90" VerticalAlignment="Center">
+                                <ComboBoxItem Content="按小时"/>
+                                <ComboBoxItem Content="按天"/>
+                                <ComboBoxItem Content="按班(8h)"/>
+                                <ComboBoxItem Content="按月"/>
+                            </ComboBox>
+
+                            <Button Content="查询" Width="64" Height="26" Margin="12,0,0,0"
+                                    VerticalAlignment="Center" Click="OnRunReport"
+                                    Background="#313244" Foreground="#FFFFFF"
+                                    BorderBrush="#45475A" BorderThickness="1"/>
+
+                            <Button Content="导出CSV" Width="80" Height="26" Margin="6,0,0,0"
+                                    VerticalAlignment="Center" Click="OnExportReport"
+                                    Background="#313244" Foreground="#FFFFFF"
+                                    BorderBrush="#45475A" BorderThickness="1"/>
+
+                            <Button Content="导出Excel" Width="88" Height="26" Margin="6,0,0,0"
+                                    VerticalAlignment="Center" Click="OnExportReportExcel"
+                                    ToolTip="导出 .xlsx(含明细、汇总、班次三个工作表)"
+                                    Background="#2A3A2A" Foreground="#FFFFFF"
+                                    BorderBrush="#45475A" BorderThickness="1"/>
+
+                            <TextBlock Text="模板:" Foreground="#C6CDE0" VerticalAlignment="Center"
+                                       Margin="12,0,0,0" FontSize="12"/>
+                            <ComboBox x:Name="ReportTemplateBox" Width="120" Height="24"
+                                      Margin="6,0,0,0" VerticalAlignment="Center"
+                                      Background="#11111B" Foreground="#FFFFFF"
+                                      SelectedIndex="0">
+                                <ComboBoxItem Content="标准(三表)"/>
+                                <ComboBoxItem Content="仅明细"/>
+                                <ComboBoxItem Content="仅汇总"/>
+                            </ComboBox>
+
+                            <TextBlock x:Name="ReportInfoText" Text="" Foreground="#C6CDE0"
+                                       Margin="14,0,0,0" VerticalAlignment="Center" FontSize="12"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <!-- 变量多选 -->
+                    <Border Grid.Row="1" Background="#1E1E2E" Padding="8" Margin="10,8,10,0">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="变量:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="12"/>
+                                <Button Content="全选" Width="56" Height="24" Margin="8,0,6,0"
+                                        Click="OnReportSelectAll" Background="#313244"
+                                        Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button Content="清空" Width="56" Height="24"
+                                        Click="OnReportClearVars" Background="#313244"
+                                        Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <TextBlock x:Name="ReportSelectedText" Text="已选 0 个"
+                                           Foreground="#C6CDE0" Margin="12,0,0,0"
+                                           VerticalAlignment="Center" FontSize="12"/>
+                            </StackPanel>
+
+                            <ListBox x:Name="ReportVarList" Height="92" Margin="0,6,0,0"
+                                     Background="#181825" Foreground="#FFFFFF"
+                                     BorderBrush="#313244" BorderThickness="1"
+                                     SelectionMode="Multiple"
+                                     SelectionChanged="OnReportVarSelectionChanged"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListBox.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel Orientation="Horizontal"/>
+                                    </ItemsPanelTemplate>
+                                </ListBox.ItemsPanel>
+                            </ListBox>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 结果表 -->
+                    <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="10,8,10,0">
+                        <DataGrid x:Name="ReportGrid"
+                                  AutoGenerateColumns="False" IsReadOnly="True"
+                                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                  Background="#181825" RowBackground="#1E1E2E"
+                                  AlternatingRowBackground="#181825" Foreground="#FFFFFF"
+                                  BorderThickness="0" FontSize="12">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding TimeText}" Width="180"/>
+                                <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
+                                <DataGridTextColumn Header="最小" Binding="{Binding MinText}" Width="110"/>
+                                <DataGridTextColumn Header="最大" Binding="{Binding MaxText}" Width="110"/>
+                                <DataGridTextColumn Header="平均" Binding="{Binding AvgText}" Width="110"/>
+                                <DataGridTextColumn Header="点数" Binding="{Binding CountText}" Width="70"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+
+                    <Border Grid.Row="3" Background="#1E1E2E" Padding="8" Margin="10,8,10,10">
+                        <TextBlock x:Name="ReportFooterText" Text=""
+                                   Foreground="#C6CDE0" FontSize="12" TextWrapping="Wrap"/>
+                    </Border>
+                </Grid>
+            </TabItem>
+            <TabItem Header="急停/点动" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+                <Grid Background="#181825" Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 急停区 -->
+                    <Border Grid.Row="0" Background="#3B0D0D" Padding="12" Margin="0,0,0,10"
+                            BorderBrush="#7F1D1D" BorderThickness="1">
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="EstopBtn" Content="■ 急停" Width="130" Height="52" FontSize="20" FontWeight="Bold"
+                                    Click="OnEstop" Background="#DC2626" Foreground="White"
+                                    BorderBrush="#991B1B" BorderThickness="2"/>
+                            <TextBlock x:Name="EstopHintText" Text="急停:把清单里所有 Bool 可写点写 0(执行前弹确认并列出点位)。需「点动」权限。"
+                                       Foreground="#FCA5A5" Margin="16,0,0,0" VerticalAlignment="Center"
+                                       FontSize="12" TextWrapping="Wrap" MaxWidth="420"/>
+                            <CheckBox x:Name="JogEnableBox" Content="启用下发" Foreground="#FCA5A5"
+                                      VerticalAlignment="Center" Margin="14,0,0,0"
+                                      Checked="OnJogEnableChanged" Unchecked="OnJogEnableChanged"/>
+                            <TextBlock x:Name="JogGateText" Text="闸门已关" Foreground="#FCA5A5"
+                                       Margin="8,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 点动区 -->
+                    <Border Grid.Row="1" Background="#1E1E2E" Padding="12" Margin="0,0,0,10">
+                        <StackPanel>
+                            <WrapPanel>
+                                <Button x:Name="JogOnBtn" Content="点动开" Width="96" Height="40" FontSize="15" Click="OnJogOn"
+                                        Background="#313244" Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <Button x:Name="JogOffBtn" Content="点动关" Width="96" Height="40" FontSize="15" Margin="10,0,0,0" Click="OnJogOff"
+                                        Background="#313244" Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                                <TextBlock Text="目标变量:" Foreground="#C6CDE0" Margin="20,0,6,0" VerticalAlignment="Center" FontSize="12"/>
+                                <ComboBox x:Name="JogVarBox" Width="220" Height="28" Background="#11111B" Foreground="#FFFFFF"
+                                          BorderBrush="#45475A">
+                                    <!-- 下拉弹层用的是系统默认白底,绝不能让它继承浅色字:
+                                         深色主题下浅色字 + 白底 = 用户完全看不见选项。
+                                         这里把主框和每个下拉项都钉成黑字白底。 -->
+                                    <ComboBox.ItemContainerStyle>
+                                        <Style TargetType="ComboBoxItem">
+                                            <Setter Property="Foreground" Value="Black"/>
+                                            <Setter Property="Background" Value="White"/>
+                                            <Setter Property="Padding" Value="6,3"/>
+                                        </Style>
+                                    </ComboBox.ItemContainerStyle>
+                                </ComboBox>
+                                <TextBlock Text="强制值:" Foreground="#C6CDE0" Margin="20,0,6,0" VerticalAlignment="Center" FontSize="12"/>
+                                <TextBox x:Name="ForceValueBox" Width="80" Height="28" Text="1"
+                                         Background="#11111B" Foreground="#FFFFFF" BorderBrush="#45475A" Padding="4,2"/>
+                                <Button x:Name="ForceWriteBtn" Content="强制写入" Width="96" Height="28" Margin="10,0,0,0" Click="OnForceWrite"
+                                        Background="#313244" Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
+                            </WrapPanel>
+                            <TextBlock x:Name="JogHintText" Text="点动只对 Bool 有效(开/关),强制写对所有数值类型有效。写入走与参数设置相同的命令闸门(串行化+限速+审计)。"
+                                       Foreground="#8C93AB" Margin="0,8,0,0" FontSize="11" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 可写 Bool 点清单 -->
+                    <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="0,0,0,8">
+                        <TextBlock x:Name="JogInfoText" Text="可写 Bool 点:加载中..." Foreground="#C6CDE0" FontSize="12"/>
+                    </Border>
+
+                    <DataGrid Grid.Row="3" x:Name="JogGrid"
+                              AutoGenerateColumns="False" IsReadOnly="True"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                              Background="#181825" RowBackground="#1E1E2E"
+                              AlternatingRowBackground="#181825" Foreground="#FFFFFF"
+                              BorderThickness="0" FontSize="12">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="组" Binding="{Binding GroupName}" Width="110"/>
+                            <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
+                            <DataGridTextColumn Header="类型" Binding="{Binding VarType}" Width="80"/>
+                            <DataGridTextColumn Header="当前值" Binding="{Binding CurrentText}" Width="110"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <TextBlock Grid.Row="4" x:Name="JogResultText" Text="" Foreground="#F9E2AF"
+                               FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- 活动报警栏 -->
+        <Border Grid.Row="2" x:Name="AlarmPanel" Background="#7F1D1D" Padding="8" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="⚠" Foreground="#FCA5A5" FontSize="16" FontWeight="Bold" VerticalAlignment="Top"/>
+                <TextBlock x:Name="AlarmText" Text="" Foreground="#FEE2E2" FontSize="13"
+                           Margin="8,0,0,0" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 底栏 -->
+        <Border Grid.Row="3" Background="#1E1E2E" Padding="8">
+            <TextBlock x:Name="FooterText" Text="" Foreground="#C6CDE0" FontSize="12"/>
+        </Border>
+    </Grid>
+</Window>
