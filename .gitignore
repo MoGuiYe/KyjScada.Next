@@ -34,7 +34,12 @@ project.nuget.cache
 *.nuget.targets
 
 # --- 运行时数据 / 本地数据库（含 24MB history.db）---
-data/
+# 注意：这里绝不能写成 `data/`（无前导斜杠）。Windows 文件系统大小写不敏感，
+#       它会把源码目录 KyjScada.Infrastructure/Data/、KyjScada.Mcp/Data/ 一起吞掉，
+#       导致这些类从未入库、clone 出来的仓库无法编译。
+#       运行时数据实际都在 bin/<配置>/data/ 下，已由上面的 [Bb]in/ 排除；
+#       下面这条只兜底仓库根目录下的 data/。
+/data/
 *.db
 *.db-shm
 *.db-wal
@@ -43,7 +48,7 @@ data/
 
 # --- 含明文口令或本地状态的本地配置 ---
 ScreenBlanker.ini
-**/data/*.ini
+/data/*.ini
 appsettings.*.local.json
 *.secrets.json
 .env
