@@ -567,14 +567,52 @@ public static class SettingsJsonCodec
             }
             catch
             {
-                // 某些文件系统不支持 Replace(或目标被占用):退化为删除后移动
-                File.Delete(path);
-                File.Move(tmp, path);
+                // 某些文件系统不支持 Replace(或目标被占用)。先尝试覆盖式移动:
+                // Windows 上 MoveFileEx(替换已存在) 在同卷内是原子的,不会出现"目标暂时不存在"。
+                try
+                {
+                    File.Move(tmp, path, overwrite: true);
+                }
+                catch
+                {
+                    // 跨卷或被独占时只能"删除后移动",这一步天然不原子。
+                    // 删掉之后若移动失败,必须用 .bak 顶回去 ——
+                    // 否则现场会看到组态文件凭空消失,下次启动直接没有参数。
+                    try
+                    {
+                        File.Delete(path);
+                        File.Move(tmp, path);
+                    }
+                    catch
+                    {
+                        RestoreBackup(path);
+
+                        throw;
+                    }
+                }
             }
         }
         else
         {
             File.Move(tmp, path);
+        }
+    }
+
+    /// <summary>
+    /// 保存失败后的兜底:把上一次的 .bak 顶回原位置。
+    /// 只是"尽量别把现场搞成没有配置文件",回滚本身失败就只能把异常交给调用方提示。
+    /// </summary>
+    private static void RestoreBackup(string path)
+    {
+        var bak = path + ".bak";
+
+        try
+        {
+            if (File.Exists(bak)) File.Copy(bak, path, overwrite: true);
+        }
+        catch
+        {
+            // 回滚失败:保留原异常(调用方会提示"保存失败"),此处不再抛
         }
     }
 }

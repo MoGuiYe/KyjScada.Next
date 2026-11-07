@@ -132,8 +132,19 @@ public sealed class DevicePipeline : IDisposable
         {
             return task.Wait(timeout);
         }
-        catch (AggregateException)
+        catch (AggregateException) when (task.IsCanceled)
         {
+            // 取消是预期路径:循环以 OperationCanceledException 结束,算正常停下
+            return true;
+        }
+        catch (AggregateException ex)
+        {
+            // 循环真的挂了。对调用方来说"确实已经停了",但必须留痕 ——
+            // 原来这里一律 return true 且不记状态,界面会显示"已停止",
+            // 现场会以为是自己点了停止,实际是线程异常退出。
+            State = "线程异常退出";
+            LastError = ex.GetBaseException().Message;
+
             return true;
         }
     }
@@ -207,7 +218,12 @@ public sealed class DevicePipeline : IDisposable
 
     public void Dispose()
     {
-        StopAndWait(TimeSpan.FromSeconds(2));
+        // 超时也要继续往下走:关闭 Service 的句柄正是打断"卡在半途的同步读"的手段。
+        // 但要把情况记下来,别让现场以为是自己点了停止。
+        if (!StopAndWait(TimeSpan.FromSeconds(2)))
+        {
+            LastError ??= "停止超时:通讯调用未在 2 秒内返回";
+        }
 
         _cts?.Dispose();
         _cts = null;

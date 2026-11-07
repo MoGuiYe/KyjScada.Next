@@ -168,7 +168,16 @@ public partial class SettingsWindow : Window
 
         try
         {
-            _settings.Save();
+            var saveError = _settings.Save ();
+
+            if (saveError is not null)
+            {
+                // 保存真的失败了就说失败,不能继续往下写"已保存"
+                ResultText.Foreground = System.Windows.Media.Brushes.OrangeRed;
+                ResultText.Text = "保存失败: " + saveError;
+
+                return;
+            }
 
             if (changed)
             {

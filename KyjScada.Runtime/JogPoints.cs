@@ -35,9 +35,51 @@ public static class JogPoints
 
         var name = g.GroupName ?? "";
 
-        return name.Contains ("设定") || name.Contains ("参数")
-            || name.Contains ("Set", StringComparison.OrdinalIgnoreCase)
-            || name.Contains ("SP", StringComparison.Ordinal);
+        // 中文按词包含判断即可 —— 「设定值」「参数」的语义是明确的。
+        if (name.Contains ("设定") || name.Contains ("参数")) return true;
+
+        // 英文缩写必须按**词边界**判断。以前是 Contains("Set")/Contains("SP"),
+        // 于是 Offset / Reset / SPEED 全都被当成设定值组 —— 测量量组被错开放写入,
+        // 而这个判断的结果直接决定"哪些点允许被写"。
+        return HasWord (name, "set") || HasWord (name, "setting") || HasWord (name, "settings")
+            || HasWord (name, "param") || HasWord (name, "params") || HasWord (name, "sp");
+    }
+
+    /// <summary>
+    /// 名称里是否含有独立的词:按"非字母数字"或"小写→大写(驼峰)"切分。
+    /// SetValue / set_value / 写入 Set / SP1 命中;Offset / Reset / SPEED 不命中。
+    /// </summary>
+    private static bool HasWord (string name, string word)
+    {
+        var start = 0;
+
+        for (var i = 0; i < name.Length; i++)
+        {
+            var ch = name[i];
+            var letterOrDigit = char.IsLetterOrDigit (ch);
+
+            if (i == 0 || !letterOrDigit || (char.IsUpper (ch) && char.IsLower (name[i - 1])))
+            {
+                start = i;
+            }
+
+            if (!letterOrDigit) continue;
+
+            // 只有当这个词正好到边界结束、长度又对得上时才算命中,
+            // 否则 "SPEED" 会在前两个字母处被误判成 "SP"。
+            var ends = i + 1 == name.Length
+                || !char.IsLetterOrDigit (name[i + 1])
+                || (char.IsUpper (name[i + 1]) && char.IsLower (ch));
+
+            if (!ends || i - start + 1 != word.Length) continue;
+
+            if (string.Compare (name, start, word, 0, word.Length, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

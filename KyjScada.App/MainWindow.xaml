@@ -93,13 +93,14 @@
             <TabItem Header="历史趋势" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
                 <Grid Background="#181825">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition x:Name="TrendLeftCol" Width="230"/>
+                        <ColumnDefinition x:Name="TrendLeftCol" Width="29"/>
+                        <ColumnDefinition Width="201"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
                     <!-- ===== 左面板:变量多选 ===== -->
                     <Border Grid.Column="0" x:Name="TrendLeftPanel" Background="#1E1E2E"
-                            BorderBrush="#313244" BorderThickness="0,0,1,0">
+                            BorderBrush="#313244" BorderThickness="0,0,1,0" Grid.ColumnSpan="2">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -172,7 +173,7 @@
                     </Border>
 
                     <!-- ===== 右侧:查询栏 + 图表 ===== -->
-                    <Grid Grid.Column="1">
+                    <Grid Grid.Column="2">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
@@ -696,7 +697,7 @@
                     </Grid>
                 </Grid>
             </TabItem>
-<!-- ========== 页签五:参数设置(写入) ========== -->
+            <!-- ========== 页签五:参数设置(写入) ========== -->
             <TabItem Header="参数设置" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
                 <Grid Background="#181825">
                     <Grid.RowDefinitions>
@@ -774,8 +775,8 @@
                     </Border>
                 </Grid>
             </TabItem>
-<!-- ========== 页签六:报表 ========== -->
-            <TabItem Header="报表" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14">
+            <!-- ========== 页签六:报表 ========== -->
+            <TabItem Header="报表" Background="#1E1E2E" Foreground="#FFFFFF" FontSize="14" Height="26" VerticalAlignment="Top">
                 <Grid Background="#181825">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>

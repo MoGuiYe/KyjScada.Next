@@ -146,10 +146,18 @@ public sealed class AppSettings
         return s;
     }
 
-    public void Save()
+    /// <summary>
+    /// 保存设置。返回 null 表示成功,否则是失败原因。
+    /// 以前这里把异常吞掉,设置窗口照样提示"已保存" —— 磁盘满/无权限时用户以为生效了。
+    /// </summary>
+    public string? Save ()
     {
         try
         {
+            // 先写临时文件再替换:直接覆盖写一半掉电,会把设置文件留成空文件,
+            // 下次启动就全回落默认值(归档周期、保留期一起丢)。
+            var tmp = FilePath + ".tmp";
+
             var sb = new StringBuilder();
 
             sb.Append("; KyjScada 应用设置(修改后重启生效)\n");
@@ -162,11 +170,15 @@ public sealed class AppSettings
             sb.Append("McpPort=").Append(McpPort).Append('\n');
             sb.Append("McpEnabled=").Append(McpEnabled ? "1" : "0").Append('\n');
 
-            File.WriteAllText(FilePath, sb.ToString(), new UTF8Encoding(false));
+            File.WriteAllText (tmp, sb.ToString (), new UTF8Encoding (false));
+
+            File.Move (tmp, FilePath, overwrite: true);
+
+            return null;
         }
-        catch
+        catch (Exception ex)
         {
-            // 保存失败只影响下次启动的默认值
+            return ex.Message;
         }
     }
 }

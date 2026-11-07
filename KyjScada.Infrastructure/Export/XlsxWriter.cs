@@ -63,37 +63,70 @@ public static class XlsxWriter
 
         var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
-        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
-        using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
+        try
         {
-            Add(zip, "[Content_Types].xml", ContentTypes(sheets.Length));
-            Add(zip, "_rels/.rels", RootRels());
-            Add(zip, "xl/workbook.xml", Workbook(sheets));
-            Add(zip, "xl/_rels/workbook.xml.rels", WorkbookRels(sheets.Length));
-            Add(zip, "xl/styles.xml", Styles());
+            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
+            using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
+            {
+                Add(zip, "[Content_Types].xml", ContentTypes(sheets.Length));
+                Add(zip, "_rels/.rels", RootRels());
+                Add(zip, "xl/workbook.xml", Workbook(sheets));
+                Add(zip, "xl/_rels/workbook.xml.rels", WorkbookRels(sheets.Length));
+                Add(zip, "xl/styles.xml", Styles());
 
-            for (var i = 0; i < sheets.Length; i++)
-            {
-                Add(zip, "xl/worksheets/sheet" + (i + 1) + ".xml", Sheet(sheets[i]));
+                for (var i = 0; i < sheets.Length; i++)
+                {
+                    Add(zip, "xl/worksheets/sheet" + (i + 1) + ".xml", Sheet(sheets[i]));
+                }
             }
-        }
 
-        // 先写临时文件再原子替换:导出到一半断电不会留下半截 xlsx
-        if (File.Exists(path))
-        {
-            try
+            // 先写临时文件再原子替换:导出到一半断电不会留下半截 xlsx
+            if (File.Exists(path))
             {
-                File.Replace(tmp, path, null);
+                try
+                {
+                    File.Replace(tmp, path, null);
+                }
+                catch
+                {
+                    // Replace 在部分文件系统/被占用时不可用。先试覆盖式移动(同卷内原子),
+                    // 实在不行才"删除后移动" —— 那一步不原子,失败时旧报表就没了,
+                    // 所以只作为最后手段。
+                    try
+                    {
+                        File.Move(tmp, path, overwrite: true);
+                    }
+                    catch
+                    {
+                        File.Delete(path);
+                        File.Move(tmp, path);
+                    }
+                }
             }
-            catch
+            else
             {
-                File.Delete(path);
                 File.Move(tmp, path);
             }
         }
-        else
+        catch
         {
-            File.Move(tmp, path);
+            // 失败时别把 .tmp 留在导出目录里:现场多半会反复点"导出",
+            // 每次留一个几十 MB 的临时文件,最后把磁盘塞满。
+            TryDelete(tmp);
+
+            throw;
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+            // 删不掉就算了:不能因为清理临时文件而盖掉原始异常
         }
     }
 

@@ -61,23 +61,34 @@ public static class ModbusValueCodec
             {
                 case "byte":
                 case "sbyte":
+                {
+                    // 8 位值只占一个字节,必须与解码(ConvertRawToValue)位置一致:
+                    // BADC/DCBA 放低字节,ABCD/CDAB 放高字节。
+                    // 以前这两种类型走的是 16 位分支,写 5 读回 0。
+                    var b = t == "sbyte" ? (byte)(sbyte)Math.Round(value) : (byte)Math.Round(value);
+
+                    var reg = order == WordOrder.Badc || order == WordOrder.Dcba
+                        ? (ushort)b
+                        : (ushort)(b << 8);
+
+                    return new[] { reg };
+                }
+
                 case "short":
                 case "ushort":
                 case "word":
                 {
-                    // 16 位:按字节序决定高低字节在寄存器里的位置
                     var raw = (ushort)(short)Math.Round(value);
 
-                    var hi = (byte)(raw >> 8);
-                    var lo = (byte)(raw & 0xFF);
-
-                    // BADC/DCBA 下,单个寄存器的字节也是反的
-                    if (order == WordOrder.Badc || order == WordOrder.Dcba)
+                    // BADC/DCBA 下单个寄存器内的字节也是反的(老系统 DataFormat 约定,
+                    // 见 KYJScadaProWpf/DataConvertLib/ByteArrayLib.Get2Bytes:ABCD 反转、BADC 原样)。
+                    // 读取侧 ConvertRawToValue 做同样的交换 —— 两侧必须严格对称,否则写 5 读回 0。
+                    return new[]
                     {
-                        return new[] { (ushort)((lo << 8) | hi) };
-                    }
-
-                    return new[] { raw };
+                        order == WordOrder.Badc || order == WordOrder.Dcba
+                            ? (ushort)((raw >> 8) | (raw << 8))
+                            : raw
+                    };
                 }
 
                 case "int":

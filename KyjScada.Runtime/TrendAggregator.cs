@@ -226,7 +226,14 @@ public static class TrendAggregator
             if (double.IsNaN(r.Value) || double.IsInfinity(r.Value)) continue;
 
             var idx = (int)((r.SampleTime - from).TotalSeconds / intervalSeconds);
-            if (idx < 0 || idx >= bucketCount) continue;
+
+            if (idx < 0) continue;
+
+            // 查询区间是闭区间(前面已经用 <= to 放行),但 span 恰好是间隔整数倍时,
+            // 落在 to 上的那个点算出来的 idx == bucketCount,会被这里静默丢掉。
+            // 后果:区间跨度整好是 10s 的倍数时,曲线最右边那个最新值消失。
+            // 归到最后一桶即可 —— 它本来就属于 [to - interval, to)。
+            if (idx >= bucketCount) idx = bucketCount - 1;
 
             if (count[idx] == 0)
             {

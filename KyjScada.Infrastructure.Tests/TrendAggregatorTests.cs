@@ -359,5 +359,28 @@ public static class TrendAggregatorTests
 
             TestHelpers.AssertEq(2, b.Count, "坏值应被过滤,剩 2 条");
         });
+
+        run("区间聚合:正好落在 to 上的点不能丢", () =>
+        {
+            var t0 = new DateTime(2026, 11, 4, 20, 0, 0);
+
+            // from→to 正好 60 秒,间隔 10 秒 → 6 个桶。
+            // 落在 to 上的那个点算出来的桶号是 6(越界),老实现直接 continue 丢掉,
+            // 于是"查询区间右端点上的最新值"在图上消失。
+            var raw = new List<HistoryRecord>
+            {
+                Rec(t0, 1),
+                Rec(t0.AddSeconds(30), 2),
+                Rec(t0.AddSeconds(60), 99)
+            };
+
+            var b = TrendAggregator.Aggregate(raw, t0, t0.AddSeconds(60), 10, TrendAggregate.Last);
+
+            TestHelpers.AssertEq(6, b.Count, "应产生 6 个桶");
+
+            var hit = b.Any(x => !double.IsNaN(x.Value) && Math.Abs(x.Value - 99) < 1e-9);
+
+            TestHelpers.AssertTrue(hit, "落在 to 上的点应归入最后一桶,实际被丢了");
+        });
     }
 }

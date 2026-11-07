@@ -144,6 +144,7 @@ public static class Program
 
         var gate = new CommandGate ();
         gate.MinInterval = TimeSpan.Zero;
+        gate.Enabled = true; // TryEnter 现在也查总开关
 
         var r1 = gate.Claim ("KYJ1_Start", "hmi");
         Check ("hmi 申请写权成功", r1 == null, r1 ?? "");
@@ -167,6 +168,7 @@ public static class Program
         // 速率限制
         var gate2 = new CommandGate ();
         gate2.MinInterval = TimeSpan.FromMilliseconds (500);
+        gate2.Enabled = true;
         gate2.Claim ("T1", "m");
         var a = gate2.TryEnter ("T1", "m", 1);
         var b = gate2.TryEnter ("T1", "m", 2);

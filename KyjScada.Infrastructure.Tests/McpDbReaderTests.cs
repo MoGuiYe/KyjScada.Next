@@ -1,4 +1,5 @@
 using KyjScada.Contracts;
+using KyjScada.Domain.History;
 using KyjScada.Infrastructure.Alarm;
 using KyjScada.Infrastructure.Data;
 using KyjScada.Mcp.Data;
@@ -125,6 +126,91 @@ public static class McpDbReaderTests
                 TestHelpers.AssertEq(1, rows.Count, "只应查到 11-06 当天的 1 条");
                 TestHelpers.AssertStr("新报警", rows[0].VarName, "查到的应是当天那条");
                 TestHelpers.AssertStr("低限", rows[0].AlarmType, "方向应映射为低限");
+            }
+            finally
+            {
+                TryDelete(dir);
+            }
+        });
+
+        run("MCP 数据层:UTC 时间入参也能查到(不能因时区后缀不同而查空)", () =>
+        {
+            var dir = Path.Combine(WorkDir(), "mcp_db_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+
+            try
+            {
+                var historyPath = Path.Combine(dir, "history.db");
+                var alarmPath = Path.Combine(dir, "alarms.db");
+
+                var historyRepo = new HistoryRepository(historyPath);
+                historyRepo.EnsureSchema();
+
+                var alarmRepo = new AlarmRepository(alarmPath);
+                alarmRepo.EnsureSchema();
+
+                var at = new DateTime(2026, 11, 6, 13, 19, 45);
+
+                alarmRepo.WriteEvents(new[]
+                {
+                    new AlarmEvent("UTC报警", AlarmDirection.High, AlarmLevel.Normal, AlarmLevel.Active, 7, at),
+                });
+
+                var varId = historyRepo.GetOrCreateVarId("UTC变量", "1", "");
+                historyRepo.WriteBatch(new[]
+                {
+                    new HistoryRecord(at, varId, 11.5, HistoryQuality.Good),
+                });
+
+                var db = new DbReader(historyPath);
+
+                // 关键点:调用方给的是 Utc 的 DateTime。库里存的是本地时间文本,
+                // 老代码直接把 Utc 时间 ToString("o") 拼上 "Z" 去比较,
+                // 'Z' > '+' 使整段区间落在库内文本之后 → 一条都查不到。
+                var start = new DateTime(2026, 11, 6, 13, 0, 0, DateTimeKind.Local).ToUniversalTime();
+                var end = new DateTime(2026, 11, 6, 14, 0, 0, DateTimeKind.Local).ToUniversalTime();
+
+                var logs = db.QueryLogs(start, end);
+                TestHelpers.AssertEq(1, logs.Count, "UTC 入参应能查到报警");
+
+                var trend = db.QueryHistory(new[] { "UTC变量" }, start, end);
+                TestHelpers.AssertEq(1, trend.Count, "UTC 入参应能查到历史点");
+            }
+            finally
+            {
+                TryDelete(dir);
+            }
+        });
+
+        run("MCP 数据层:查询端点正好等于报警时间时也算命中", () =>
+        {
+            var dir = Path.Combine(WorkDir(), "mcp_db_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+
+            try
+            {
+                var historyPath = Path.Combine(dir, "history.db");
+                var alarmPath = Path.Combine(dir, "alarms.db");
+
+                new HistoryRepository(historyPath).EnsureSchema();
+
+                var alarmRepo = new AlarmRepository(alarmPath);
+                alarmRepo.EnsureSchema();
+
+                var at = new DateTime(2026, 11, 6, 13, 19, 45);
+
+                alarmRepo.WriteEvents(new[]
+                {
+                    new AlarmEvent("边界报警", AlarmDirection.High, AlarmLevel.Normal, AlarmLevel.Active, 3, at),
+                });
+
+                var db = new DbReader(historyPath);
+
+                // Kind=Unspecified 的时间:老代码 ToString("o") 不带偏移,
+                // 它恰是库内带 +08:00 文本的前缀 → 字符串比较把这行排除掉了。
+                var rows = db.QueryLogs(at, at);
+
+                TestHelpers.AssertEq(1, rows.Count, "端点上的报警不能因为时区形状不同被排除");
             }
             finally
             {

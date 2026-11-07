@@ -97,6 +97,53 @@ public static class AlarmServiceTests
             TestHelpers.AssertEq(0, svc.WatchedVarCount, "不应有监视变量");
         });
 
+        // 采集线程在 ProcessSnapshot/GetActiveAlarms 里枚举状态机槽位,
+        // 界面线程在改配置时会 BuildFrom 重建。老实现只锁了"清空"那两行,
+        // 填充在锁外 —— 枚举方会撞 Collection was modified(界面线程上等于直接崩)。
+        run("报警规则编译:重建与采集并发不抛集合已修改", () =>
+        {
+            var svc = new AlarmService();
+            var dev = MakeDevice("V1", true, 100, true, 10);
+
+            svc.BuildFrom(dev);
+
+            var snap = new ValueSnapshot(1, DateTime.Now, true,
+                new Dictionary<string, TagValue>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["V1"] = new TagValue("V1", 200.0, TagQuality.Good, DateTime.Now)
+                });
+
+            var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var stop = false;
+
+            var worker = new Thread(() =>
+            {
+                while (!Volatile.Read(ref stop))
+                {
+                    try
+                    {
+                        svc.ProcessSnapshot(snap);
+                        svc.GetActiveAlarms();
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add(ex.GetType().Name + ": " + ex.Message);
+                    }
+                }
+            });
+
+            worker.Start();
+
+            for (int i = 0; i < 200; i++) svc.BuildFrom(dev);
+
+            Volatile.Write(ref stop, true);
+            worker.Join();
+
+            TestHelpers.AssertEq(0, errors.Count, "并发重建不应抛异常,实际第一条: "
+                + (errors.Count > 0 ? errors.First() : ""));
+            TestHelpers.AssertEq(2, svc.MachineCount, "重建后仍应有 2 台状态机");
+        });
+
         run("报警规则编译:NaN/Infinity 阈值被忽略", () =>
         {
             var svc = new AlarmService();

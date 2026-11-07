@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using KyjScada.Mcp.Data;
 using ModelContextProtocol.Server;
 
@@ -187,8 +188,8 @@ public sealed class ReadOnlyTools
         DateTime s, e;
         try
         {
-            s = DateTime.ParseExact(start, DbReader.TimeFormat, null);
-            e = DateTime.ParseExact(end, DbReader.TimeFormat, null);
+            s = DateTime.ParseExact(start, DbReader.TimeFormat, CultureInfo.InvariantCulture);
+            e = DateTime.ParseExact(end, DbReader.TimeFormat, CultureInfo.InvariantCulture);
         }
         catch
         {
@@ -233,8 +234,8 @@ public sealed class ReadOnlyTools
         DateTime s, e;
         try
         {
-            s = DateTime.ParseExact(start, DbReader.TimeFormat, null);
-            e = DateTime.ParseExact(end, DbReader.TimeFormat, null);
+            s = DateTime.ParseExact(start, DbReader.TimeFormat, CultureInfo.InvariantCulture);
+            e = DateTime.ParseExact(end, DbReader.TimeFormat, CultureInfo.InvariantCulture);
         }
         catch
         {
@@ -311,10 +312,10 @@ public sealed class ReadOnlyTools
         {
             s = string.IsNullOrWhiteSpace(start)
                 ? DateTime.Now.Date.AddDays(-1)
-                : DateTime.ParseExact(start, DbReader.TimeFormat, null);
+                : DateTime.ParseExact(start, DbReader.TimeFormat, CultureInfo.InvariantCulture);
             e = string.IsNullOrWhiteSpace(end)
                 ? DateTime.Now.Date.AddDays(1).AddSeconds(-1)
-                : DateTime.ParseExact(end, DbReader.TimeFormat, null);
+                : DateTime.ParseExact(end, DbReader.TimeFormat, CultureInfo.InvariantCulture);
         }
         catch
         {
@@ -334,8 +335,8 @@ public sealed class ReadOnlyTools
             return $"查询失败: {ex.Message}";
         }
 
-        var sText = s.ToString(DbReader.TimeFormat);
-        var eText = e.ToString(DbReader.TimeFormat);
+        var sText = s.ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture);
+        var eText = e.ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture);
 
         if (logs.Count == 0)
             return $"在 {sText} ~ {eText} 范围内无日志记录。";
@@ -427,7 +428,7 @@ public sealed class ReadOnlyTools
         DateTime t;
         try
         {
-            t = DateTime.ParseExact(insertTime, DbReader.TimeFormat, null);
+            t = DateTime.ParseExact(insertTime, DbReader.TimeFormat, CultureInfo.InvariantCulture);
         }
         catch
         {

@@ -1,4 +1,5 @@
 using KyjScada.Contracts;
+using KyjScada.Infrastructure.Data;
 using Microsoft.Data.Sqlite;
 
 namespace KyjScada.Infrastructure.Alarm;
@@ -119,7 +120,7 @@ CREATE INDEX IF NOT EXISTS IX_AlarmEvents_Time
 
         EnsureSchema();
 
-        var now = DateTime.Now.ToString("o");
+        var now = ToDbTime(DateTime.Now);
 
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
@@ -146,7 +147,7 @@ VALUES (@v, @d, @t, @val, @occ, @w);";
                 pD.Value = (int)ev.Direction;
                 pT.Value = ev.IsTrigger ? 1 : 0;
                 pVal.Value = ev.Value;
-                pOcc.Value = ev.At.ToString("o");
+                pOcc.Value = ToDbTime(ev.At);
                 pW.Value = now;
                 cmd.ExecuteNonQuery();
             }
@@ -161,6 +162,9 @@ VALUES (@v, @d, @t, @val, @occ, @w);";
         string? varName = null, DateTime? from = null, DateTime? to = null, int limit = 200,
         bool? acked = null)
     {
+        // LIMIT 0 是"不返回"而不是"不限",传 0/负数时回落默认条数
+        if (limit <= 0) limit = 200;
+
         EnsureSchema();
 
         var where = new List<string>();
@@ -186,12 +190,12 @@ VALUES (@v, @d, @t, @val, @occ, @w);";
         }
         if (from.HasValue)
         {
-            var p = cmd.CreateParameter(); p.ParameterName = "@f"; p.Value = from.Value.ToString("o");
+            var p = cmd.CreateParameter(); p.ParameterName = "@f"; p.Value = ToDbTime(from.Value);
             cmd.Parameters.Add(p);
         }
         if (to.HasValue)
         {
-            var p = cmd.CreateParameter(); p.ParameterName = "@t"; p.Value = to.Value.ToString("o");
+            var p = cmd.CreateParameter(); p.ParameterName = "@t"; p.Value = ToDbTime(to.Value);
             cmd.Parameters.Add(p);
         }
         var pLim = cmd.CreateParameter(); pLim.ParameterName = "@lim"; pLim.Value = limit;
@@ -230,7 +234,7 @@ VALUES (@v, @d, @t, @val, @occ, @w);";
 
         cmd.CommandText = "UPDATE AlarmEvents SET AckAt = @t WHERE Id = @id AND AckAt IS NULL;";
 
-        cmd.Parameters.AddWithValue("@t", at.ToString("o"));
+        cmd.Parameters.AddWithValue("@t", ToDbTime(at));
         cmd.Parameters.AddWithValue("@id", id);
 
         return cmd.ExecuteNonQuery();
@@ -252,10 +256,10 @@ VALUES (@v, @d, @t, @val, @occ, @w);";
             ? "UPDATE AlarmEvents SET AckAt = @t WHERE AckAt IS NULL AND OccurredAt <= @until AND OccurredAt >= @since;"
             : "UPDATE AlarmEvents SET AckAt = @t WHERE AckAt IS NULL AND OccurredAt <= @until;";
 
-        cmd.Parameters.AddWithValue("@t", at.ToString("o"));
-        cmd.Parameters.AddWithValue("@until", upto.ToString("o"));
+        cmd.Parameters.AddWithValue("@t", ToDbTime(at));
+        cmd.Parameters.AddWithValue("@until", ToDbTime(upto));
 
-        if (since.HasValue) cmd.Parameters.AddWithValue("@since", since.Value.ToString("o"));
+        if (since.HasValue) cmd.Parameters.AddWithValue("@since", ToDbTime(since.Value));
 
         return cmd.ExecuteNonQuery();
     }
@@ -268,8 +272,17 @@ VALUES (@v, @d, @t, @val, @occ, @w);";
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "DELETE FROM AlarmEvents WHERE OccurredAt < @t;";
-        var p = cmd.CreateParameter(); p.ParameterName = "@t"; p.Value = time.ToString("o");
+        var p = cmd.CreateParameter(); p.ParameterName = "@t"; p.Value = ToDbTime(time);
         cmd.Parameters.Add(p);
+
         return cmd.ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// 把时间统一成**写入时用的那种文本形状**:`yyyy-MM-ddTHH:mm:ss.fffffff+08:00`。
+    ///
+    /// OccurredAt 是 TEXT 列,区间过滤走的是**字符串比较**。写库与查询必须用同一种形状,
+    /// 否则边界那一行会被静默排除、UTC 时间会让整段区间查不到 —— 细节见 <see cref="DbTime"/>。
+    /// </summary>
+    private static string ToDbTime (DateTime time) => DbTime.FormatRoundtrip (time);
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -9,6 +10,7 @@ using KyjScada.Domain.Protocol;
 using KyjScada.Infrastructure.Acquisition;
 using KyjScada.Infrastructure.Alarm;
 using KyjScada.Infrastructure.Data;
+using KyjScada.Infrastructure.Export;
 using KyjScada.Infrastructure.Users;
 using KyjScada.Runtime;
 
@@ -59,6 +61,14 @@ public partial class MainWindow : Window
 
         // Shift+拖拽框选 → 区间统计
         TrendChart.RangeSelected += OnTrendRangeSelected;
+
+        // 实时趋势的跟随/重置/光标:只在这里订阅一次。
+        // InitLiveTrend 在每次切换设备时都会重跑,若在那里 += 匿名 lambda,
+        // 切 N 次后一次光标移动就会回调 N 次(越用越卡,且无法 -= 回收)。
+        // 注意不能监听 ViewChanged —— SetSeries 内部也会触发它,那样每 tick 都会停跟随。
+        LiveChart.UserAdjustedView += () => { _liveFollow = false; };
+        LiveChart.UserResetView += () => { _liveFollow = true; };
+        LiveChart.CursorMoved += OnLiveCursorMoved;
 
         // 首次切到趋势页时自动查一次
         MainTabs.SelectionChanged += (s, e) =>
@@ -1671,20 +1681,8 @@ public partial class MainWindow : Window
                 foreach (var r in rows) sw.WriteLine (r);
             }
 
-            if (File.Exists (dlg.FileName))
-            {
-                try { File.Replace (tmp, dlg.FileName, null); }
-                catch
-                {
-                    // 目标被占用等:退化为覆盖
-                    File.Delete (dlg.FileName);
-                    File.Move (tmp, dlg.FileName);
-                }
-            }
-            else
-            {
-                File.Move (tmp, dlg.FileName);
-            }
+            // 原子替换:同卷内不会出现"目标暂时不存在",失败也不会丢原文件
+            AtomicFileWrite.Replace (tmp, dlg.FileName);
 
             TrendStatsText.Text = "已导出 " + rows.Count + " 行 × " + csvSeries.Count + " 条曲线  →  " + dlg.FileName;
         }
@@ -2138,11 +2136,7 @@ private void InitLiveTrend ()
     if (LiveWindowBox.SelectedIndex < 0) LiveWindowBox.SelectedIndex = 1; // 默认 5 分钟
     if (LiveModeBox.SelectedIndex < 0) LiveModeBox.SelectedIndex = 0;     // 默认叠加
 
-    // 用户手动缩放/平移后停止跟随,避免"刚拖回去又被拽走";
-    // 注意不能监听 ViewChanged —— SetSeries 内部也会触发它,那样每 tick 都会停跟随
-    LiveChart.UserAdjustedView += () => { _liveFollow = false; };
-    LiveChart.UserResetView += () => { _liveFollow = true; };
-    LiveChart.CursorMoved += OnLiveCursorMoved;
+    // 事件订阅已移到构造函数(只订阅一次),这里不再 +=
 
     // 默认选前 3 个
     var take = Math.Min (3, LiveVarList.Items.Count);
@@ -2754,7 +2748,7 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
 
     if (sender is not Button btn || btn.Tag is not WriteRow row) return;
 
-    if (!double.TryParse (row.InputText, out var value))
+    if (!double.TryParse (row.InputText, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
     {
         WriteResultText.Text = "「" + row.VarName + "」的输入不是有效数字: " + row.InputText;
 
@@ -2770,7 +2764,22 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
     var gate = _gate;
     var name = row.VarName;
 
-    var result = await Task.Run (() => gate.Write (name, value, "hmi")).ConfigureAwait (true);
+    WriteOutcome result;
+
+        // 写入可能抛(连接断开、服务已释放等)。async void 里没有 catch 会直接终止进程,
+        // 而且按钮会永远停在 disabled —— 这里兜住并把原因显示出来。
+        try
+        {
+            result = await Task.Run (() => gate.Write (name, value, "hmi")).ConfigureAwait (true);
+        }
+        catch (Exception ex)
+        {
+            btn.IsEnabled = true;
+
+            WriteResultText.Text = "✘ " + name + " 写入异常: " + ex.Message;
+
+            return;
+        }
 
     btn.IsEnabled = true;
 
@@ -3067,8 +3076,10 @@ private void TickAlarmPage ()
             return;
         }
 
-        // 默认打开当前正在用的那个协议文件,没有就退到目录里第一个 json
-        var preferred = Path.Combine (dir, _device?.ProtocolKey == "ModbusTCP" ? "ModbusTCP.json" : "ModbusTCP.json");
+        // 默认打开当前正在用的那个协议文件(文件名 = <ProtocolKey>.json),没有就退到目录里第一个 json
+        var proto = string.IsNullOrWhiteSpace (_device?.ProtocolKey) ? "ModbusTCP" : _device!.ProtocolKey;
+
+        var preferred = Path.Combine (dir, proto + ".json");
 
         var path = File.Exists (preferred)
             ? preferred
@@ -3145,7 +3156,13 @@ private void TickAlarmPage ()
         var pipeline = coord.Restart (_device);
 
         _pipeline = pipeline ?? _pipeline;
-        _svc = pipeline?.Service ?? _svc;
+
+        // 用新流水线的服务(即便为 null 也接受):失败时宁可让写入被闸门拒绝,
+        // 也不能继续持有已 Dispose 的旧服务(否则下发必崩)。
+        if (pipeline is not null) _svc = pipeline.Service;
+
+        // 闸门持有的是具体服务实例,重建后必须同步,否则写入仍打到旧服务
+        if (_gate is not null) _gate.Writer = _svc as IDeviceWriter;
 
         if (pipeline is not null)
         {
@@ -3205,11 +3222,29 @@ private void TickAlarmPage ()
         foreach (var name in candidates)
         {
             var dir = Path.Combine (baseDir, name);
-            if  (Directory.Exists (dir))
+
+            if (!Directory.Exists (dir)) continue;
+
+            // 现场可能只用 RTU/RTU-over-TCP:不能只认 ModbusTCP.json,
+            // 否则"配置导入/自检"会报找不到配置。取第一个真正有设备的文件。
+            foreach (var file in Directory.GetFiles (dir, "*.json"))
             {
-                var files = Directory.GetFiles (dir, "ModbusTCP.json");
-                if  (files.Length > 0) return files[0];
+                try
+                {
+                    var projects = SettingsJsonCodec.LoadFile (file);
+                    var project = SettingsJsonCodec.ActiveProject (projects);
+
+                    if (project is not null && project.AllDevices ().Any ()) return file;
+                }
+                catch
+                {
+                    // 坏文件跳过,继续找下一个
+                }
             }
+
+            var any = Directory.GetFiles (dir, "*.json");
+
+            if (any.Length > 0) return any.OrderBy (f => f, StringComparer.OrdinalIgnoreCase).First ();
         }
 
         var direct = Path.Combine (baseDir, "settings.json");

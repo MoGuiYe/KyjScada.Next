@@ -252,6 +252,9 @@ public sealed class ModbusRtuOverTcpTransport : IModbusTransport
             }
             catch (ModbusException)
             {
+                // 协议层异常后 TCP 流里可能还挂着残帧,必须断开重连才能重新对齐
+                Disconnect();
+
                 throw;
             }
             catch (Exception ex)

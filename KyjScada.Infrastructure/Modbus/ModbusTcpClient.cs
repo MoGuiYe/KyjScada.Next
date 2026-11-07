@@ -294,6 +294,10 @@ public sealed class ModbusTcpClient : IDisposable
         }
         catch (ModbusException)
         {
+            // 协议层异常(超时/CRC/半帧)之后流里可能还留着残帧,
+            // 不断开的话下一帧会从错误的边界开始读 —— 现场表现为"一断就连续报错"。
+            Disconnect ();
+
             throw;
         }
         catch (Exception ex)

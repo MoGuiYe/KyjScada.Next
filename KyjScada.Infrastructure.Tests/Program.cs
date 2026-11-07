@@ -304,6 +304,7 @@ KyjScada.Infrastructure.Tests.TrendAggregatorTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.TrendStatsTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.TrendTemplateTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.XlsxWriterTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.AtomicFileWriteTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.LegacyMigratorTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
         Run("界面行模型:129 个变量都能建行且初始为 --", () =>

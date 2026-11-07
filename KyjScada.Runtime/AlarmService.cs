@@ -48,12 +48,22 @@ public sealed class AlarmService
     /// <summary>从设备配置编译报警规则。未启用报警的变量不占状态机。</summary>
     public void BuildFrom(DeviceConfig device)
     {
+        // 整个构建过程都必须持锁,不能只锁"清空"那两行。
+        // 采集线程在 ProcessSnapshot 里枚举 _machines.Values,界面线程在
+        // GetActiveAlarms 里枚举同一批槽位;这边在锁外往里塞条目,枚举方就会撞上
+        // "Collection was modified"(界面线程上那一次等于直接崩,采集侧则白白丢一个周期,
+        // 而且可能跑到一半的状态机 —— 报警悄悄漏掉)。
         lock (_sync)
         {
             _machines.Clear();
             _watchedVars.Clear();
+            FillFromUnlocked (device);
         }
+    }
 
+    /// <summary>真正的填充逻辑。**调用方必须已持有 _sync**。</summary>
+    private void FillFromUnlocked (DeviceConfig device)
+    {
         foreach (var group in device.GroupList)
         {
             if (group.VarList is null) continue;

@@ -267,19 +267,8 @@ public partial class MainWindow
 
             File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
 
-            if (File.Exists(dlg.FileName))
-            {
-                try { File.Replace(tmp, dlg.FileName, null); }
-                catch
-                {
-                    File.Delete(dlg.FileName);
-                    File.Move(tmp, dlg.FileName);
-                }
-            }
-            else
-            {
-                File.Move(tmp, dlg.FileName);
-            }
+            // 原子替换(同卷原子,失败不丢原文件),收尾细节见 AtomicFileWrite
+            AtomicFileWrite.Replace(tmp, dlg.FileName);
 
             ReportFooterText.Text = "已导出 " + _reportRows.Count + " 行 → " + dlg.FileName;
         }

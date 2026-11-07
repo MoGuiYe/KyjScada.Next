@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -1158,19 +1158,8 @@ private static List<string> SplitCsv(string line)
 
             File.WriteAllText(tmp, sb.ToString(), new System.Text.UTF8Encoding(true));
 
-            if (File.Exists(dlg.FileName))
-            {
-                try { File.Replace(tmp, dlg.FileName, null); }
-                catch
-                {
-                    File.Delete(dlg.FileName);
-                    File.Move(tmp, dlg.FileName);
-                }
-            }
-            else
-            {
-                File.Move(tmp, dlg.FileName);
-            }
+            // 原子替换(同卷原子,失败不丢原文件),收尾细节见 AtomicFileWrite
+            KyjScada.Infrastructure.Export.AtomicFileWrite.Replace(tmp, dlg.FileName);
 
             ProblemText.Text = "已导出变量表:" + dlg.FileName;
         }

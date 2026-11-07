@@ -227,5 +227,47 @@ VALUES ('OldVar', 0, 1, 42.0, '2026-11-01T10:00:00.0000000+08:00', '2026-11-01T1
             TestHelpers.AssertStr("触发", rows[1].TypeText, "第二条应为触发");
             TestHelpers.AssertStr("上限", rows[0].DirectionText, "方向应为上限");
         });
+
+        run("报警查询:区间边界包含端点(时区/精度不同也要命中)", () =>
+        {
+            var db = DbPath("bound");
+            if (File.Exists(db)) File.Delete(db);
+
+            var repo = new AlarmRepository(db);
+            repo.EnsureSchema();
+
+            var t = new DateTime(2026, 11, 7, 10, 0, 0);
+            repo.WriteEvents(new List<AlarmEvent> { Trigger("V1", 100, t) });
+
+            // 界面/ MCP 传进来的时间通常是 Kind=Unspecified(没有 +08:00 后缀),
+            // 写库时是 Local(带后缀)。两者做字符串比较时,前者是后者的前缀,
+            // 老实现会把正好落在边界上的那条过滤掉 —— 这里锁死"必须命中"。
+            var rows = repo.Query("V1", from: t, to: t);
+
+            TestHelpers.AssertEq(1, rows.Count, "from=to=事件时刻应查到 1 条");
+
+            var utc = t.ToUniversalTime().AddHours(-1);
+            TestHelpers.AssertEq(1, repo.Query("V1", from: utc).Count, "UTC 早于事件的时刻也应查到");
+        });
+
+        run("报警查询:limit<=0 回落默认而不是返回空", () =>
+        {
+            var db = DbPath("limit");
+            if (File.Exists(db)) File.Delete(db);
+
+            var repo = new AlarmRepository(db);
+            repo.EnsureSchema();
+
+            var t = new DateTime(2026, 11, 7, 11, 0, 0);
+            repo.WriteEvents(new List<AlarmEvent>
+            {
+                Trigger("V1", 100, t),
+                Trigger("V1", 101, t.AddSeconds(1))
+            });
+
+            // SQLite 的 LIMIT 0 = 一条不返回。AI 客户端传 0 时会以为"没有报警"。
+            TestHelpers.AssertEq(2, repo.Query("V1", limit: 0).Count, "limit=0 应回落默认值");
+            TestHelpers.AssertEq(2, repo.Query("V1", limit: -5).Count, "limit 负数同样回落");
+        });
     }
 }

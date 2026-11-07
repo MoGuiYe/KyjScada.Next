@@ -73,7 +73,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         {
             var host = conn?.IpAddress ?? "127.0.0.1";
             var port = conn?.Port ?? 502;
-            _client = new ModbusTcpTransport (host, port, 1);
+            _client = new ModbusTcpTransport (host, port, StationIdOf (device));
         }
     }
 
@@ -223,16 +223,15 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         {
             if (fn == ModbusFunction.ReadCoils)
             {
-                var coils = _client.ReadCoils (baseOffset, (ushort)length);
-                raw = CoilsToWords (coils);
+                raw = CoilsToWords (ReadCoilsChunked (baseOffset, length));
             }
             else if (fn == ModbusFunction.ReadInputRegisters)
             {
-                raw = _client.ReadInputRegisters (baseOffset, (ushort)length);
+                raw = ReadInputRegistersChunked (baseOffset, length);
             }
             else
             {
-                raw = _client.ReadHoldingRegisters (baseOffset, (ushort)length);
+                raw = ReadHoldingRegistersChunked (baseOffset, length);
             }
         }
         catch (Exception ex)
@@ -276,6 +275,64 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         {
             batch[v.VarName] = new TagValue (v.VarName, null, TagQuality.NotCollected, t);
         }
+    }
+
+    /// <summary>单帧读寄存器的协议上限(PDU 253 字节 → 125 个寄存器)。</summary>
+    private const int MaxRegistersPerRead = 125;
+
+    /// <summary>单帧读线圈的协议上限。</summary>
+    private const int MaxCoilsPerRead = 2000;
+
+    /// <summary>
+    /// 按协议上限分段读寄存器。
+    /// 以前直接用组跨度读,组里超过 125 个(或线圈超过 2000)时从站会返回非法数据长度,
+    /// 整组一起失败 —— 现场表现为"这一大片点全是通讯失败"。
+    /// </summary>
+    private ushort[] ReadHoldingRegistersChunked (ushort start, int count)
+    {
+        var all = new ushort[count];
+
+        for (var done = 0; done < count; done += MaxRegistersPerRead)
+        {
+            var take = Math.Min (MaxRegistersPerRead, count - done);
+            var part = _client.ReadHoldingRegisters ((ushort)(start + done), (ushort)take);
+
+            Array.Copy (part, 0, all, done, take);
+        }
+
+        return all;
+    }
+
+    /// <summary>按协议上限分段读输入寄存器。</summary>
+    private ushort[] ReadInputRegistersChunked (ushort start, int count)
+    {
+        var all = new ushort[count];
+
+        for (var done = 0; done < count; done += MaxRegistersPerRead)
+        {
+            var take = Math.Min (MaxRegistersPerRead, count - done);
+            var part = _client.ReadInputRegisters ((ushort)(start + done), (ushort)take);
+
+            Array.Copy (part, 0, all, done, take);
+        }
+
+        return all;
+    }
+
+    /// <summary>按协议上限分段读线圈。</summary>
+    private bool[] ReadCoilsChunked (ushort start, int count)
+    {
+        var all = new bool[count];
+
+        for (var done = 0; done < count; done += MaxCoilsPerRead)
+        {
+            var take = Math.Min (MaxCoilsPerRead, count - done);
+            var part = _client.ReadCoils ((ushort)(start + done), (ushort)take);
+
+            Array.Copy (part, 0, all, done, take);
+        }
+
+        return all;
     }
 
     private static (byte Fn, ushort Offset)? ParseGroupStart (string start)
@@ -326,7 +383,9 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     private static bool TryParseVarAddress (VariableConfig v, out int abs, out int bit)
     {
         abs = -1;
-        bit = 0;
+        // -1 = 没有位号;0 是合法的"第 0 位"。以前拿 0 当哨兵,
+        // 于是 `40001.0` 这种点位会被当成"整寄存器"读,值永远是错的。
+        bit = -1;
 
         var raw = v.Start;
 
@@ -342,7 +401,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             // 单段也要归一:现场有 `40001` 这种写法(等于偏移 0),
             // 也有 `100` 这种纯偏移。漏掉归一会让偏移变成 40001 → 直接越界读不到。
             abs = NormalizeOffset (only);
-            bit = 0;
+            bit = -1;
             return true;
         }
 
@@ -359,7 +418,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                 if (!seg0Ok) return false;
 
                 abs = NormalizeRegister (seg1);
-                bit = 0;
+                bit = -1;
                 return true;
             }
 
@@ -426,7 +485,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         if (fn == ModbusFunction.ReadCoils) return raw[rel] != 0 ? 1.0 : 0.0;
 
         // 位地址(`200.01` 这种):取寄存器的某一位,而不是整个字
-        if (bit > 0)
+        if (bit >= 0)
         {
             return ((raw[rel] >> bit) & 0x1) != 0 ? 1.0 : 0.0;
         }
@@ -466,6 +525,12 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         }
     }
 
+    private static bool NeedsByteSwap (WordOrder order)
+        => order == WordOrder.Badc || order == WordOrder.Dcba;
+
+    /// <summary>交换单个寄存器内的高/低字节。</summary>
+    private static ushort SwapRegisterBytes (ushort raw) => (ushort)((raw >> 8) | (raw << 8));
+
     private static double? ConvertRawToValue (ushort[] raw, VariableConfig v, WordOrder order)
     {
         var t = (v.VarType ?? "").Trim ().ToLowerInvariant ();
@@ -480,8 +545,21 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                     ? (byte)(raw[0] & 0xFF)
                     : (byte)(raw[0] >> 8);
                 break;
-            case "short": eng = (short)raw[0]; break;
-            case "ushort": case "word": eng = raw[0]; break;
+            case "sbyte":
+                // 与 byte 同样的高/低字节约定,只是带符号:
+                // 以前没有这个分支,写 -1 会落到 default 按无符号读成 65535。
+                eng = (order == WordOrder.Badc || order == WordOrder.Dcba)
+                    ? (sbyte)(raw[0] & 0xFF)
+                    : (sbyte)(raw[0] >> 8);
+                break;
+            case "short":
+                // 16 位单寄存器:BADC/DCBA 下字节是反的,必须和写入编码对称
+                // (以前这里不交换,而 Encode 交换 —— 写了值读回来的永远是别人)。
+                eng = (short)(NeedsByteSwap (order) ? SwapRegisterBytes (raw[0]) : raw[0]);
+                break;
+            case "ushort": case "word":
+                eng = NeedsByteSwap (order) ? SwapRegisterBytes (raw[0]) : raw[0];
+                break;
             case "int": case "int32":
                 if (raw.Length < 2) return null;
                 eng = BitConverter.ToInt32 (ToBytes (raw, 2, order), 0);
@@ -645,7 +723,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         var type = (v.VarType ?? "").Trim ().ToLowerInvariant ();
 
         // 位地址必须拒绝:Modbus 没有"写单个位"的功能码
-        if (TryParseVarAddress (v, out _, out var bit) && bit > 0)
+        if (TryParseVarAddress (v, out _, out var bit) && bit >= 0)
         {
             reason = "位地址需要读改写,当前不支持写入";
             return false;
@@ -728,7 +806,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
         // 位地址写不进去:Modbus 没有"写某一个位"的功能码,
         // 要读-改-写整个寄存器,还得防止并发覆盖。宁可明确拒绝,别让人以为写成功了。
-        if (bit > 0)
+        if (bit >= 0)
         {
             error = "位地址(" + target.Start + ")需要读改写,当前不支持单独写某一位";
             return false;
@@ -747,6 +825,18 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         {
             var type = (target.VarType ?? "").Trim ().ToLowerInvariant ();
 
+            // 读的时候是  工程值 = 原始值 * Scale + Offset(Scale==0 当 1),
+            // 下发前必须做逆运算,否则带 Scale/Offset 的点写进去的是工程值,
+            // 设备按原始值解释 —— 读回来会是另一个数(现场表现为"设了 10 实际 100")。
+            var targetScale = target.Scale == 0f ? 1f : target.Scale;
+            var rawValue = (value - target.Offset) / targetScale;
+
+            if (double.IsNaN (rawValue) || double.IsInfinity (rawValue))
+            {
+                error = "换算后的值非法(请检查 Scale/Offset)";
+                return false;
+            }
+
             // 写入必须发【绝对地址】= 组基准 + 组内相对偏移。
             // 读取时 rel 只是"这块连续数据里的下标",写入时少了基准就会写到别的区 ——
             // 实测漏掉这一步会把设定值写到实时值寄存器上,现场属于严重事故。
@@ -754,13 +844,23 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             if (type is "bool" or "boolean")
             {
-                _client.WriteCoil (writeAddress, value != 0);
+                // Bool 点落在哪个区由组起始地址的功能码决定:
+                // 0xxxx(线圈)才是 WriteCoil;3xxxx/4xxxx 里的是"寄存器里的 1 位",
+                // 用 WriteCoil 会写到同号线圈上 —— 完全是另一个点。
+                if (parsed.Value.Fn == ModbusFunction.ReadCoils)
+                {
+                    _client.WriteCoil (writeAddress, rawValue != 0);
+                    LastError = null;
+                    return true;
+                }
+
+                _client.WriteRegister (writeAddress, rawValue != 0 ? (ushort)1 : (ushort)0);
                 LastError = null;
                 return true;
             }
 
             // 写入前用与读取相反的字节序做编码,保证读回来值不变
-            var regs = ModbusValueCodec.Encode (value, target, _device.WordOrder);
+            var regs = ModbusValueCodec.Encode (rawValue, target, _device.WordOrder);
 
             if (regs is null)
             {

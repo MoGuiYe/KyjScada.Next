@@ -46,10 +46,10 @@ dotnet build KyjScada.Next.sln -v m          # 期望: 0 错误 0 警告
 
 | 检查 | 结果 |
 |---|---|
-| `dotnet build` | 0 错误 / 0 警告 |
+| `dotnet build` | 0 错误 / 约 120 条既有警告（nullable、未使用字段一类提示，非本轮引入） |
 | `KyjScada.Domain.Tests` | **43 通过 / 0 失败** |
-| `KyjScada.Infrastructure.Tests` | **292 通过 / 0 失败** |
-| `KyjScada.Verify` | 6 项全 PASS |
+| `KyjScada.Infrastructure.Tests` | **304 通过 / 0 失败** |
+| `KyjScada.Verify` | **6 个测试组 / 28 条断言全 PASS** |
 
 ---
 
@@ -68,6 +68,7 @@ dotnet build KyjScada.Next.sln -v m          # 期望: 0 错误 0 警告
 | 给 AI 开放更多 MCP 工具 | [08 MCP 与辅助程序](08-MCP与辅助程序.md) | 09 配方 5 | `KyjScada.Mcp\Tools\` |
 | 查现场问题（通讯断、库锁、卡顿） | [10 构建调试与排障](10-构建调试与排障.md) | — | — |
 | 加测试 / 判断改完能不能交付 | [11 测试与验收基线](11-测试与验收基线.md) | — | `KyjScada.*.Tests\` |
+| 要改历史库表结构（跨设备同名变量、时间精度） | [13 历史库改造方案](13-历史库改造方案-跨设备与时间精度.md) | 02 的表结构 | `HistorySchema.cs` / `HistoryRepository.cs` |
 
 ---
 
@@ -86,7 +87,7 @@ D:\DeepSeekHarness\KyjScada.Next\        ← 源码根（没有 git 仓库）
 ├─ KyjScada.Verify\         (351 行)     模块化架构实证程序
 ├─ KyjScada.Migrate\        (150 行)     老库 → 新库一次性迁移 CLI
 ├─ KyjScada.Domain.Tests\                配置/协议/报警状态机测试（43）
-├─ KyjScada.Infrastructure.Tests\        Modbus/仓储/趋势/MCP 测试（292）
+├─ KyjScada.Infrastructure.Tests\        Modbus/仓储/趋势/MCP 测试（304）
 ├─ docs\                                  ← 本文档集
 └─ PROGRESS.md                           开发过程记录（含每轮的实测证据，改代码前值得翻）
 

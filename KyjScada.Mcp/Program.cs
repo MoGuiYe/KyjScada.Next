@@ -1,3 +1,4 @@
+using System.Globalization;
 using KyjScada.Mcp.Data;
 using KyjScada.Mcp.Tools;
 using Microsoft.AspNetCore.Builder;
@@ -41,11 +42,11 @@ public static class Program
                 ("read_variable", () => tools.ReadVariable("LQT_Level")),
                 ("read_variables", () => tools.ReadVariables("LQT_Level,KYJ1_OutTemp")),
                 ("query_stat", () => tools.QueryStat("LQT_Level",
-                    DateTime.Now.AddHours(-2).ToString(DbReader.TimeFormat),
-                    DateTime.Now.ToString(DbReader.TimeFormat))),
+                    DateTime.Now.AddHours(-2).ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture),
+                    DateTime.Now.ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture))),
                 ("query_alarms", () => tools.QueryAlarms(
-                    DateTime.Now.AddDays(-1).ToString(DbReader.TimeFormat),
-                    DateTime.Now.ToString(DbReader.TimeFormat))),
+                    DateTime.Now.AddDays(-1).ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture),
+                    DateTime.Now.ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture))),
                 ("get_device_summary", () => tools.GetDeviceSummary()),
                 ("get_write_status", () => writeTools.GetWriteStatus()),
                 ("write_variable", () => writeTools.WriteVariable("LQT_Level", 50)),

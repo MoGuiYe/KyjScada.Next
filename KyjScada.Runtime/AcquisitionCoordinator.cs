@@ -54,7 +54,8 @@ public sealed class AcquisitionCoordinator : IDisposable
     }
 
     /// <summary>为一批设备建流水线(已存在的设备保留原实例,不打断正在采的连接)。</summary>
-    public IReadOnlyList<DevicePipeline> Build(IEnumerable<DeviceConfig> devices, Func<string, bool>? canCollect = null)
+    /// <param name="dropMissing">true=把不在 devices 里的已有设备视为"配置已删除"并停掉;false=只增量,供 Restart 单台重建使用。</param>
+    public IReadOnlyList<DevicePipeline> Build(IEnumerable<DeviceConfig> devices, Func<string, bool>? canCollect = null, bool dropMissing = true)
     {
         var added = new List<DevicePipeline>();
         var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -91,17 +92,21 @@ public sealed class AcquisitionCoordinator : IDisposable
             added.Add(pipeline);
         }
 
-        // 配置里已经没有的设备:停掉并释放,避免幽灵采集
-        List<DevicePipeline> drop;
-
-        lock (_lock)
+        // 配置里已经没有的设备:停掉并释放,避免幽灵采集。
+        // dropMissing=false 时(只重建单台,见 Restart)不能走这里,否则会把其它设备当"已删除"停掉。
+        if (dropMissing)
         {
-            drop = _pipelines.Where(kv => !keep.Contains(kv.Key)).Select(kv => kv.Value).ToList();
+            List<DevicePipeline> drop;
 
-            foreach (var d in drop) _pipelines.Remove(d.DeviceName);
+            lock (_lock)
+            {
+                drop = _pipelines.Where(kv => !keep.Contains(kv.Key)).Select(kv => kv.Value).ToList();
+
+                foreach (var d in drop) _pipelines.Remove(d.DeviceName);
+            }
+
+            foreach (var d in drop) d.Dispose();
         }
-
-        foreach (var d in drop) d.Dispose();
 
         return added;
     }
@@ -123,7 +128,7 @@ public sealed class AcquisitionCoordinator : IDisposable
 
         old?.Dispose();
 
-        Build(new[] { device });
+        Build(new[] { device }, null, dropMissing: false);
 
         var fresh = Find(device.DeviceName);
 

@@ -103,6 +103,13 @@ public sealed class CommandGate
     {
         lock (_lock)
         {
+            // 总开关也要在这里查:模块可以绕过 Write 直接调 TryEnter,
+            // 不查的话"没授权也能下发"。
+            if (!Enabled)
+            {
+                return "写拒绝: 写入未启用(需授权后开启)";
+            }
+
             var hasOwner = _owner.TryGetValue (tagName, out var owner);
 
             if
@@ -278,6 +285,8 @@ public sealed class CommandGate
 
         if (Writer is null)
         {
+            MarkOutcome (varName, false);
+
             return WriteOutcome.Fail (WriteVerdict.DeviceError, "没有可用的设备写入器");
         }
 
@@ -285,12 +294,37 @@ public sealed class CommandGate
 
         if (!sent)
         {
+            MarkOutcome (varName, false);
+
             return WriteOutcome.Fail (WriteVerdict.DeviceError,
                 string.IsNullOrEmpty (error) ? "设备写入失败" : error);
         }
 
+        MarkOutcome (varName, true);
+
         return WriteOutcome.Ok ("已写入 " + varName + " = " + value.ToString ("G6"));
+    }
+
+    /// <summary>
+    /// 给最近一条审计补上"实际结果"。
+    /// TryEnter 在**下发之前**就落了审计(它要先记时间戳做限速),如果这里不补,
+    /// 事后看审计会以为每条都写成功了 —— 实际上设备报错的那些也在列表里。
+    /// </summary>
+    private void MarkOutcome (string varName, bool success)
+    {
+        lock (_lock)
+        {
+            for (var i = _audit.Count - 1; i >= 0; i--)
+            {
+                if (_audit[i].TagName == varName && _audit[i].Outcome is null)
+                {
+                    _audit[i] = _audit[i] with { Outcome = success ? "ok" : "fail" };
+
+                    return;
+                }
+            }
+        }
     }
 }
 
-public sealed record WriteAudit (DateTime Time, string TagName, string ModuleId, object? Value);
+public sealed record WriteAudit (DateTime Time, string TagName, string ModuleId, object? Value, string? Outcome = null);

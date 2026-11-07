@@ -1,8 +1,10 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using KyjScada.Domain.Config;
 using KyjScada.Domain.Users;
+using KyjScada.Runtime;
 
 namespace KyjScada.App;
 
@@ -280,7 +282,18 @@ public partial class MainWindow
         var gate = _gate;
         var name = row.VarName;
 
-        var r = await Task.Run(() => gate.Write(name, value, "jog")).ConfigureAwait(true);
+        WriteOutcome r;
+
+        try
+        {
+            r = await Task.Run(() => gate.Write(name, value, "jog")).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            JogResultText.Text = "✘ " + name + " 点动异常: " + ex.Message;
+
+            return;
+        }
 
         JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " " + action + ": " + r.Message;
     }
@@ -303,7 +316,7 @@ public partial class MainWindow
             return;
         }
 
-        if (!double.TryParse(ForceValueBox.Text, out var value))
+        if (!double.TryParse(ForceValueBox.Text, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
         {
             JogResultText.Text = "强制值不是有效数字: " + ForceValueBox.Text;
             return;
@@ -321,7 +334,18 @@ public partial class MainWindow
         var gate = _gate;
         var name = row.VarName;
 
-        var r = await Task.Run(() => gate.Write(name, value, "force")).ConfigureAwait(true);
+        WriteOutcome r;
+
+        try
+        {
+            r = await Task.Run(() => gate.Write(name, value, "force")).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            JogResultText.Text = "✘ " + name + " 强制写异常: " + ex.Message;
+
+            return;
+        }
 
         JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " 强制: " + r.Message;
     }
