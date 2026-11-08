@@ -302,6 +302,136 @@ public static class AcquisitionTests
             var dev = projects[0].AllDevices ().First ();
             TestHelpers.AssertTrue (dev.WordOrder == KyjScada.Domain.Config.WordOrder.Abcd, "缺省应为 ABCD");
         });
+
+        run ("位地址:Start=200.0(第 0 位)按单 bit 读,不当整寄存器", () =>
+        {
+            // 以前 bit 用 0 当"没有位号"的哨兵,`200.0` 这种点会被当成整寄存器读,
+            // 值永远是整字(0x0003)而不是 bit0(1)。这是真实配置里最常见的写法。
+            var sim = new ModbusSlaveSimulator ();
+            // 组基准必须盖住寄存器 200:组起始 1.400201 → 偏移 200,长度 10
+            var svc = BuildService (sim, "Short", "200.0", "1.400201", 10);
+            var bus = new ValueBus ();
+            try
+            {
+                sim.SetRegister (200, 0x0003); // bit0=1, bit1=1, 其余 0
+
+                var ok = svc.CollectOnce (bus, DateTime.Now);
+                AssertEq (1, ok, "位点应能读到");
+
+                var tv = bus.GetSnapshot ()["T1"];
+                AssertTrue (tv?.Value != null, "值不应为 null");
+                AssertTrue (Math.Abs ((tv?.AsDouble () ?? double.NaN) - 1.0) < 1e-9,
+                    "bit0 应为 1(整字会是 3),实际 " + tv.AsDouble ());
+
+                // 换个值:0x0002 → bit0 = 0,bit1 = 1
+                sim.SetRegister (200, 0x0002);
+
+                ok = svc.CollectOnce (bus, DateTime.Now);
+                AssertEq (1, ok, "第二次也应读到");
+
+                tv = bus.GetSnapshot ()["T1"];
+                AssertTrue (Math.Abs ((tv?.AsDouble () ?? double.NaN) - 0.0) < 1e-9,
+                    "0x0002 的 bit0 应为 0,实际 " + tv?.AsDouble ());
+            }
+            finally { svc.Dispose (); sim.Dispose (); }
+        });
+
+        run ("字节序:四种序都能把自己编码的寄存器读回原值(往返)", () =>
+        {
+            foreach (var order in new[] { WordOrder.Abcd, WordOrder.Badc, WordOrder.Cdab, WordOrder.Dcba })
+            {
+                var sim = new ModbusSlaveSimulator ();
+                var svc = BuildService (sim, "Float", "1.40001", "1.400001", 10, 1f, 0f, order);
+                var bus = new ValueBus ();
+                try
+                {
+                    var regs = RegsForFloat (5.5f, order);
+                    sim.SetRegister (0, regs[0]);
+                    sim.SetRegister (1, regs[1]);
+
+                    var ok = svc.CollectOnce (bus, DateTime.Now);
+                    AssertEq (1, ok, order + " 应读到 1 个");
+
+                    var tv = bus.GetSnapshot ()["T1"];
+                    AssertTrue (tv?.Value != null, order + " 值不应为 null");
+                    AssertTrue (Math.Abs ((tv?.AsDouble () ?? double.NaN) - 5.5) < 0.001,
+                        order + " 往返应得 5.5,实际 " + tv?.AsDouble ());
+                }
+                finally { svc.Dispose (); sim.Dispose (); }
+            }
+        });
+
+        run ("地址越界:65535 起的 Float 跨出 16 位空间时明确报错,不回绕", () =>
+        {
+            var sim = new ModbusSlaveSimulator ();
+            // 组起始 465536 = 偏移 65535(16 位空间的最后一个寄存器),长度 2 已经越界
+            var svc = BuildService (sim, "Float", "65535", "1.465536", 2);
+            var bus = new ValueBus ();
+            try
+            {
+                // (ushort)65536 会回绕成 0 —— "读到了别的点位"比读失败危险得多
+                sim.SetRegister (0, FloatHi (5.5f));
+                sim.SetRegister (1, FloatLo (5.5f));
+
+                var ok = svc.CollectOnce (bus, DateTime.Now);
+
+                AssertEq (0, ok, "越界组不应采到任何点");
+
+                var tv = bus.GetSnapshot ()["T1"];
+                AssertTrue (tv?.Value == null,
+                    "越界点必须是 null,绝不能是回绕地址上的值 " + tv?.AsDouble ());
+                AssertTrue (tv is null || (int)tv.Quality != 0, "越界点质量不能是 Good");
+
+                AssertTrue (!string.IsNullOrEmpty (svc.LastError) && svc.LastError!.Contains ("越界"),
+                    "应明确报告地址越界,实际 LastError=" + svc.LastError);
+            }
+            finally { svc.Dispose (); sim.Dispose (); }
+        });
+
+        run ("地址越界:解析不出来的组起始(70000)只报未采集,不抛异常", () =>
+        {
+            var sim = new ModbusSlaveSimulator ();
+            var svc = BuildService (sim, "Short", "1.70000", "1.70000", 10);
+            var bus = new ValueBus ();
+            try
+            {
+                // 组起始 70000 既不是 4xxxx/3xxxx/1xxxx 任何一段的合法起始,
+                // 也不在 0..65535 之内:必须直接判为"这个组不可读",一个点都不采。
+                // (绝不能 (ushort)70000 回绕成 4464 去读别人。)
+                var ok = svc.CollectOnce (bus, DateTime.Now);
+
+                AssertEq (0, ok, "组起始非法时不应采到任何点");
+
+                var tv = bus.GetSnapshot ()["T1"];
+                AssertTrue (tv?.Value == null, "不应把任何值当成这个点");
+                AssertTrue (tv is null || (int)tv.Quality != 0, "质量应为未采集");
+            }
+            finally { svc.Dispose (); sim.Dispose (); }
+        });
+    }
+
+    /// <summary>
+    /// 按字序把 float 编成两个寄存器(读入侧的逆变换,与 ModbusAcquisitionService.ToBytes 对称)。
+    /// 大端字对 + 视字序做整字反转 / 字节交换。
+    /// </summary>
+    private static ushort[] RegsForFloat (float v, WordOrder order)
+    {
+        var hi = FloatHi (v);
+        var lo = FloatLo (v);
+
+        var regs = new[] { hi, lo };
+
+        if (order == WordOrder.Cdab || order == WordOrder.Dcba) Array.Reverse (regs);
+
+        if (order == WordOrder.Badc || order == WordOrder.Dcba)
+        {
+            for (var i = 0; i < regs.Length; i++)
+            {
+                regs[i] = (ushort)((regs[i] << 8) | (regs[i] >> 8));
+            }
+        }
+
+        return regs;
     }
 
     private static ModbusAcquisitionService BuildService (ModbusSlaveSimulator sim, string varType, int regCount, string varAddress, float scale = 1f, float offset = 0f)
@@ -323,7 +453,7 @@ public static class AcquisitionTests
         group.VarList.Add (new VariableConfig { VarName = "T1", VarType = varType, VarAddress = varStart, Start = varStart, Scale = scale, Offset = offset });
         device.GroupList.Add (group);
         var desc = ProtocolRegistry.Find ("ModbusTCP");
-        return new ModbusAcquisitionService (device, desc);
+        return new ModbusAcquisitionService (device, desc!);
     }
     private static ushort FloatHi (float v)
     {

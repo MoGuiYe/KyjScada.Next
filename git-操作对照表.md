@@ -139,6 +139,19 @@
 | 已跟踪文件退出跟踪 | config/app.ini 被跟踪了，移出版本库但本地保留 | `git rm --cached config/app.ini` + 加 `.gitignore` |
 | 查为什么没提交 | 为什么 xxx 没被提交？ | `git check-ignore -v xxx` |
 | 看哪些文件会被提交 | 这次提交会带上哪些文件？ | `git status --short` 或 `git add -n .` |
+| 忽略规则吞了源码目录 | clone 下来编译不过，是不是漏了文件？ | `git ls-files --others --ignored --exclude-standard` 找被忽略的源码 + `git check-ignore -v <file>` 定位规则 → 修规则 → 补提交 |
+| 校验仓库完整性 | 这个仓库 clone 下来能编译吗？ | `git archive --format=tar HEAD \| tar -tf -` 核对关键源码；严格做法：临时 clone 后跑构建 |
+
+### ⚠️ 忽略规则的裸目录名陷阱（真实事故）
+
+`.gitignore` 里写 `data/`、`temp/`、`config/` 这类**不带前导斜杠的裸目录名**，会匹配任意层级的同名目录；Windows 文件系统大小写不敏感，`data/` 连 `Data/` 也一并命中。本项目因此把 `KyjScada.Infrastructure/Data/` 与 `KyjScada.Mcp/Data/` 共 6 个 `.cs` 全吞了，而 11 个已跟踪文件 `using` 这两个命名空间 —— **本地磁盘源码还在、本地能编译，只有 clone 出来的仓库是坏的**。这类问题 `git status` 看不出来，因为被忽略的文件根本不显示。
+
+四条规矩：
+
+1. 目录规则要么加前导 `/` 限定层级（`/data/` 只匹配仓库根），要么精确到产物路径（`[Bb]in/`、`[Oo]bj/`）。**别用裸目录名去「兜底」运行时数据**，产物目录规则通常已经覆盖。
+2. 提交前反向排查：`git ls-files --others --ignored --exclude-standard`，看有没有被误忽略的源码；`git check-ignore -v <file>` 看命中哪一行。
+3. 首次提交、或改过 `.gitignore` 之后，做一次完整性校验：`git archive --format=tar HEAD | tar -tf -`，或 clone 到临时目录跑一次构建（0 错误才算好）。
+4. 发现漏文件按平台约定**新建提交**补回，不改写历史；旧提交仍缺文件要如实告知用户，别让「当前 HEAD 能编译」掩盖「历史提交不能编译」。
 
 ## 8. 远程仓库（GitHub / Gitee / 内网 GitLab）
 
@@ -174,8 +187,9 @@
 | 场景 | 你这样说（提示词） | 我的做法 |
 |---|---|---|
 | 在子目录 / 子仓库里操作 | 对某个子项目做 git 操作 | `git -C <绝对路径> status` 这类写法，不靠 `cd`（工具没有 workdir 参数），路径写成 `/c/...` `/d/...` |
-| 提交前排雷 | 提交前检查有没有不该进库的文件 | 扫 `node_modules/`、`dist/`、`build/`、`*.exe`、`*.asar`、`*.rar`、`*.zip`，以及含明文密码/密钥的配置文件，命中就拦下 |
+| 提交前排雷 | 提交前检查有没有不该进库的文件 | 扫 `node_modules/`、`dist/`、`build/`、`*.exe`、`*.asar`、`*.rar`、`*.zip` 与含明文密码/密钥的配置，命中就拦下；**反向再查** `git ls-files --others --ignored --exclude-standard` 里有没有被误吞的源码（漏文件比多提交更致命，见第 7 节） |
 | 大文件预警 | 这次提交会不会带大文件？ | 提交前 `git status --short` + 检查体积，超 10MB 先提醒 |
+| 校验仓库完整性 | 这个仓库 clone 下来能编译吗？ | `git archive --format=tar HEAD \| tar -tf -` 核对关键源码；严格做法：临时 clone 后跑构建，0 错误才算好（清理临时目录若被策略拦截，停止重试并告知路径） |
 | 别动平台自身文件 | 别把安装目录 / 配置目录提交进去 | 平台安装目录（`resources/app.asar` 等）只读、不进用户仓库；`.workbuddy/` 是项目数据目录，不清理不删除，按需加进 `.gitignore` |
 | 命令被拦下 | 提示没有权限 | 立即停止并向你说明，**不**换工具或等价命令重试 |
 | 想先看看再动手 | 先告诉我你会改哪些文件 | 切 Ask 模式只读分析，或 Plan 模式先出计划；不执行任何写操作 |

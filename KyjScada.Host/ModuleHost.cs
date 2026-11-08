@@ -23,10 +23,28 @@ public sealed class ModuleHost
         _configSource = configSource;
     }
 
-    /// <summary>注册服务。必须在 Load 之前完成。</summary>
-    public void Provide<T>(T instance) where T : class
+    /// <summary>
+    /// 服务 → 提供它的模块 Id。由集成方在 Provide 时显式声明。
+    /// 契约里没有"模块提供哪些服务"的字段,靠 Id 和服务名猜是不可靠的
+    /// (现实里的 Id 是 "trend.realtime" 这种点分写法,跟 IValueReader 对不上),
+    /// 所以拓扑排序优先用这张表;没声明的才退回按名字猜。
+    /// </summary>
+    private readonly Dictionary<Type, string> _providerModules = new();
+
+    /// <summary>
+    /// 注册服务。必须在 Load 之前完成。
+    /// </summary>
+    /// <param name="providerModuleId">
+    /// 可选:这个服务由哪个模块提供(模块的 Id)。给了它,依赖方就会排在那个模块后面。
+    /// </param>
+    public void Provide<T>(T instance, string? providerModuleId = null) where T : class
     {
         _services.Provide (instance);
+
+        if (!string.IsNullOrWhiteSpace (providerModuleId))
+        {
+            _providerModules[typeof(T)] = providerModuleId!;
+        }
     }
 
     /// <summary>
@@ -128,9 +146,38 @@ public sealed class ModuleHost
     /// <summary>
     /// 依赖拓扑排序。检测循环依赖并报告。
     /// </summary>
-    private static List<IModule> TopologicalSort(List<IModule> modules, LoadReport report)
+    private List<IModule> TopologicalSort(List<IModule> modules, LoadReport report)
     {
-        var byId = modules.ToDictionary(m => m.Id);
+        // 先按 Id 去重。原来直接 modules.ToDictionary(m => m.Id):
+        // 有两个模块 Id 撞了会抛 ArgumentException,而这个方法在 Load 的
+        // per-module try 外面 —— 整个宿主加载当场崩掉,报告里一条记录都没有,
+        // 现场只能看到"程序起不来"。这里改成:报告重复,保留第一个。
+        var byId = new Dictionary<string, IModule>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var m in modules)
+        {
+            var id = m.Id ?? "";
+
+            if (id.Length == 0)
+            {
+                report.Rejected.Add(new RejectInfo("(空)", m.DisplayName, "模块 Id 为空"));
+
+                continue;
+            }
+
+            if (byId.ContainsKey(id))
+            {
+                report.Rejected.Add(new RejectInfo(id, m.DisplayName,
+                    "模块 Id 与已注册模块重复,已忽略后一个"));
+
+                continue;
+            }
+
+            byId[id] = m;
+        }
+
+        modules = byId.Values.ToList();
+
         var result = new List<IModule>();
         var visiting = new HashSet<string>();
         var visited = new HashSet<string>();
@@ -146,13 +193,30 @@ public sealed class ModuleHost
             }
 
             // 依赖的服务若由某个模块提供,那个模块要先启动。
-            // 这里用约定:模块 Id 与它提供的服务类型做弱关联不可靠,
-            // 所以只按 Requires 中「有同名模块」的情况排序。
+            // 契约里没有"模块提供哪些服务"的显式声明,只能按命名约定反推,
+            // 所以这里必须宽松且**忽略大小写**:原来只比 x.Id == dep.Name.ToLowerInvariant(),
+            // 于是 Id 写成 "HistoryStore" 的模块配不上 IHistoryStore 依赖,
+            // 拓扑顺序丢了一半 —— 依赖方先启动,再在启动期崩掉。
             foreach (var dep in m.Requires)
             {
-                var provider = modules.FirstOrDefault(x => x.Id == dep.Name.ToLowerInvariant());
+                // 先看集成方有没有显式声明"这个服务由哪个模块提供",
+                // 声明了就精确排序;没声明才退回按名字猜(猜不中就是没边,由依赖校验兜底)。
+                IModule? provider;
+
+                if (_providerModules.TryGetValue(dep, out var providerId))
+                {
+                    provider = modules.FirstOrDefault(
+                        x => string.Equals(x.Id, providerId, StringComparison.OrdinalIgnoreCase));
+                }
+                else
+                {
+                    provider = FindProvider(modules, dep);
+                }
+
                 if (provider != null && provider.Id != m.Id)
                 {
+                    _log.Info($"依赖排序: {dep.Name} 由模块 {provider.Id} 提供,排在 {m.Id} 之前");
+
                     Visit(provider);
                 }
             }
@@ -165,6 +229,32 @@ public sealed class ModuleHost
         foreach (var m in modules) Visit(m);
 
         return result;
+    }
+
+    /// <summary>
+    /// 按命名约定为依赖服务猜提供者:服务类型名 <c>IHistoryStore</c>
+    /// 依次尝试 "ihistorystore"、"historystore"、"historystoremodule"、"historystoremodule" 等写法,
+    /// 全部忽略大小写。猜不到返回 null(由调用方的"缺依赖服务"分支去报告)。
+    /// </summary>
+    private static IModule? FindProvider(List<IModule> modules, Type service)
+    {
+        var name = service.Name;
+        var bare = name.Length > 1 && name[0] == 'I' && char.IsUpper(name[1]) ? name.Substring(1) : name;
+
+        foreach (var candidate in new[] { name, bare })
+        {
+            foreach (var suffix in new[] { "", "Module", "Service", "Host" })
+            {
+                var wanted = candidate + suffix;
+
+                var hit = modules.FirstOrDefault(
+                    x => string.Equals(x.Id, wanted, StringComparison.OrdinalIgnoreCase));
+
+                if (hit != null) return hit;
+            }
+        }
+
+        return null;
     }
 }
 

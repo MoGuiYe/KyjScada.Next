@@ -108,7 +108,7 @@ public sealed class ReadOnlyTools
                 ? "历史库为空,还没有任何归档数据。"
                 : "ActualData 表为空,无任何归档数据。";
 
-        var (insertTime, values) = latest.Value;
+        var (insertTime, values, times) = latest.Value;
 
         string? raw = null;
         foreach (var kv in values)
@@ -128,14 +128,23 @@ public sealed class ReadOnlyTools
                 : $"变量 {name} 不存在于 ActualData 表。可用列(前20): {avail}";
         }
 
-        var freshness = DescribeFreshness(insertTime);
+        // 用这个变量自己的归档时间判新鲜度:全库最新时刻代表不了它
+        times.TryGetValue(name, out var varTime);
+        var stamp = varTime ?? insertTime;
+
+        var freshness = DescribeFreshness(stamp);
         var shown = raw == null ? "NULL(该时刻无记录)" : raw;
+
+        var note = varTime != null && insertTime != null && !string.Equals(varTime, insertTime, StringComparison.Ordinal)
+            ? "说明: 该变量的最后归档时间早于全库最新时刻,新鲜度按它自己的时间戳算。\n"
+            : "";
 
         return
             $"变量: {name}\n" +
             $"值: {shown}\n" +
-            $"时间戳: {insertTime}\n" +
+            $"时间戳: {stamp}\n" +
             $"新鲜度: {freshness}\n" +
+            note +
             $"说明: 这是归档快照值,不是内存实时值。若新鲜度非 fresh,请勿当作当前状态。";
     }
 
@@ -147,14 +156,15 @@ public sealed class ReadOnlyTools
         if (latest == null)
             return _db.IsNewSchema ? "历史库为空。" : "ActualData 表为空。";
 
-        var (insertTime, values) = latest.Value;
+        var (insertTime, values, times) = latest.Value;
         var wanted = names.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"时间戳: {insertTime}  新鲜度: {DescribeFreshness(insertTime)}");
+        sb.AppendLine($"全库最新时间戳: {insertTime}  新鲜度: {DescribeFreshness(insertTime)}");
+        sb.AppendLine("(每个变量按自己的归档时间判新鲜度:同一库里各点的最后归档时刻可能差很远)");
         sb.AppendLine();
-        sb.AppendLine("| 变量 | 值 |");
-        sb.AppendLine("|---|---|");
+        sb.AppendLine("| 变量 | 值 | 时间戳 | 新鲜度 |");
+        sb.AppendLine("|---|---|---|---|");
 
         foreach (var w in wanted)
         {
@@ -171,8 +181,9 @@ public sealed class ReadOnlyTools
                 }
             }
 
+            times.TryGetValue(w, out var wTime);
             var shown = !exists ? "(列不存在)" : (raw == null ? "NULL" : raw);
-            sb.AppendLine($"| {w} | {shown} |");
+            sb.AppendLine($"| {w} | {shown} | {wTime ?? "(无)"} | {DescribeFreshness(wTime)} |");
         }
 
         return sb.ToString();
@@ -305,16 +316,22 @@ public sealed class ReadOnlyTools
     {
         if (limit <= 0) limit = 100;
 
-        // 不传时间就查最近一天:调用方(尤其是自动化客户端)经常只给工具名,不给参数,
+        // 不传时间就查最近 24 小时:调用方(尤其是自动化客户端)经常只给工具名,不给参数,
         // 以前会直接抛 ArgumentNullException,协议层只回一句 "An error occurred",看不出问题。
+        //
+        // 注意"最近 24 小时"不能写成 Date.AddDays(-1) ~ Date.AddDays(1):
+        // 那是昨天 0 点到明天 23:59,跨度 48 小时且把未来时间也算进去,
+        // 与工具说明里的"最近 24 小时"不符,报警条数还会被无端放大一倍。
+        var now = DateTime.Now;
+
         DateTime s, e;
         try
         {
             s = string.IsNullOrWhiteSpace(start)
-                ? DateTime.Now.Date.AddDays(-1)
+                ? now.AddHours(-24)
                 : DateTime.ParseExact(start, DbReader.TimeFormat, CultureInfo.InvariantCulture);
             e = string.IsNullOrWhiteSpace(end)
-                ? DateTime.Now.Date.AddDays(1).AddSeconds(-1)
+                ? now
                 : DateTime.ParseExact(end, DbReader.TimeFormat, CultureInfo.InvariantCulture);
         }
         catch
@@ -436,6 +453,14 @@ public sealed class ReadOnlyTools
         }
 
         var age = DateTime.Now - t;
+
+        // 时间戳在未来:可能是设备/系统时钟错乱,也可能是有人构造的数据。
+        // 原来拿负的 age 去比 <10,会直接报成 "fresh(约 0 秒前)" —— 最坏的一种误判。
+        if (age.TotalSeconds < -5)
+            return $"unknown(时间戳在未来 {(-age).TotalMinutes:0} 分钟,请检查系统/设备时钟)";
+
+        // 轻微超前(几秒)是时钟抖动,当刚采到处理
+        if (age.TotalSeconds < 0) age = TimeSpan.Zero;
 
         if (age.TotalSeconds < 10) return $"fresh(约 {age.TotalSeconds:0} 秒前)";
         if (age.TotalSeconds < 60) return $"stale(约 {age.TotalSeconds:0} 秒前,可能采集中断)";

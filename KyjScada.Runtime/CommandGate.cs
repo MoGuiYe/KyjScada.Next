@@ -53,9 +53,15 @@ public sealed record WriteOutcome(WriteVerdict Verdict, string Message)
 public sealed class CommandGate
 {
     private readonly object _lock = new();
-    private readonly Dictionary<string, DateTime> _lastWriteAt = new (StringComparer.OrdinalIgnoreCase);
+    // 限速用**单调时钟**(TickCount64),时间戳只给人看。
+    // 原来用 DateTime.Now 算间隔,机器被 NTP 往回校时之后
+    // "现在 - 上次" 会一直是负数,于是该测点被限速锁死,直到系统时间追上那次写入。
+    private readonly Dictionary<string, long> _lastWriteAt = new (StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _owner = new (StringComparer.OrdinalIgnoreCase);
     private readonly List<WriteAudit> _audit = new ();
+
+    /// <summary>审计流水号。每条审计一个唯一 id,下发结果按 id 回填,不再"按名字找最近一条"。</summary>
+    private long _auditSeq;
 
     /// <summary>同一测点最小写间隔。默认 500ms。</summary>
     public TimeSpan MinInterval { get; set; } = TimeSpan.FromMilliseconds (500);
@@ -101,6 +107,20 @@ public sealed class CommandGate
     /// </summary>
     public string? TryEnter (string tagName, string moduleId, object? value)
     {
+        return TryEnter (tagName, moduleId, value, out _);
+    }
+
+    /// <summary>
+    /// 同 <see cref="TryEnter(string, string, object?)"/>,另外把本次审计的流水号带出来。
+    ///
+    /// 为什么要返回 id:审计是在**下发之前**落的,下发结果得事后回填。
+    /// 早先的回填方式是"从后往前找第一条同名的未结案记录" —— 同一个测点在
+    /// MinInterval 之后可以再次进入,两条在途写入一交错,后一条的结果就写到了前一条头上,
+    /// 审计表会把失败的记成成功。带 id 就没有歧义。
+    /// </summary>
+    public string? TryEnter (string tagName, string moduleId, object? value, out long auditId)
+    {
+        auditId = 0;
         lock (_lock)
         {
             // 总开关也要在这里查:模块可以绕过 Write 直接调 TryEnter,
@@ -119,22 +139,25 @@ public sealed class CommandGate
             }
 
             var now = DateTime.Now;
-            var hasLast = _lastWriteAt.TryGetValue (tagName, out var last);
+            var tick = Environment.TickCount64;
+            var hasLast = _lastWriteAt.TryGetValue (tagName, out var lastTick);
 
             if
             (hasLast)
             {
-                var gap = now - last;
+                var gapMs = tick - lastTick;
 
                 if
-                (gap < MinInterval)
+                (gapMs < (long)MinInterval.TotalMilliseconds)
                 {
-                    return $"写拒绝: 测点 {tagName} 距上次写仅 {gap.TotalMilliseconds:0}ms,小于最小间隔 {MinInterval.TotalMilliseconds:0}ms。";
+                    return $"写拒绝: 测点 {tagName} 距上次写仅 {gapMs}ms,小于最小间隔 {MinInterval.TotalMilliseconds:0}ms。";
                 }
             }
 
-            _lastWriteAt[tagName] = now;
-            _audit.Add (new WriteAudit (now, tagName, moduleId, value));
+            _lastWriteAt[tagName] = tick;
+
+            auditId = ++_auditSeq;
+            _audit.Add (new WriteAudit (now, tagName, moduleId, value, null, auditId, tick));
 
             if
             (_audit.Count > 2000)
@@ -276,7 +299,8 @@ public sealed class CommandGate
         }
 
         // 占用与限速交给已有的 TryEnter(它已经处理了模块互斥与最小间隔)
-        var rejected = TryEnter (varName, moduleId, rawValue ?? value);
+        // 同时拿到审计 id:下发结果按 id 回填,并发写同一个测点时不会标错条目
+        var rejected = TryEnter (varName, moduleId, rawValue ?? value, out var auditId);
 
         if (rejected is not null)
         {
@@ -285,46 +309,82 @@ public sealed class CommandGate
 
         if (Writer is null)
         {
-            MarkOutcome (varName, false);
+            MarkOutcome (auditId, false);
 
             return WriteOutcome.Fail (WriteVerdict.DeviceError, "没有可用的设备写入器");
         }
 
-        var sent = Writer.WriteVariable (varName, value, out var error);
-
-        if (!sent)
+        try
         {
-            MarkOutcome (varName, false);
+            var sent = Writer.WriteVariable (varName, value, out var error);
 
-            return WriteOutcome.Fail (WriteVerdict.DeviceError,
-                string.IsNullOrEmpty (error) ? "设备写入失败" : error);
+            if (!sent)
+            {
+                MarkOutcome (auditId, false);
+
+                return WriteOutcome.Fail (WriteVerdict.DeviceError,
+                    string.IsNullOrEmpty (error) ? "设备写入失败" : error);
+            }
+
+            MarkOutcome (auditId, true);
+
+            return WriteOutcome.Ok ("已写入 " + varName + " = " + value.ToString ("G6"));
         }
+        catch
+        {
+            // 写入器抛异常时也要结案:否则这条审计永远挂着 Outcome=null,
+            // 事后看审计既不像成功也不像失败,查不出到底下发没有。
+            MarkOutcome (auditId, false);
 
-        MarkOutcome (varName, true);
-
-        return WriteOutcome.Ok ("已写入 " + varName + " = " + value.ToString ("G6"));
+            throw;
+        }
     }
 
     /// <summary>
-    /// 给最近一条审计补上"实际结果"。
-    /// TryEnter 在**下发之前**就落了审计(它要先记时间戳做限速),如果这里不补,
-    /// 事后看审计会以为每条都写成功了 —— 实际上设备报错的那些也在列表里。
+    /// 给指定审计补上"实际结果"。按流水号定位,不按名字匹配 ——
+    /// 名字匹配在并发同名写入时会标错条目,而且大小写敏感(配置里写成 kyJ1_Start
+    /// 就找不到 KYJ1_Start 那条,审计永远悬空)。
     /// </summary>
-    private void MarkOutcome (string varName, bool success)
+    private void MarkOutcome (long auditId, bool success)
     {
+        if (auditId <= 0) return;
+
         lock (_lock)
         {
             for (var i = _audit.Count - 1; i >= 0; i--)
             {
-                if (_audit[i].TagName == varName && _audit[i].Outcome is null)
+                if (_audit[i].Id == auditId)
                 {
-                    _audit[i] = _audit[i] with { Outcome = success ? "ok" : "fail" };
+                    var record = _audit[i];
+
+                    _audit[i] = record with { Outcome = success ? "ok" : "fail" };
+
+                    // 失败要把限速时间戳撤掉:TryEnter 在下发之前就记了"刚写过",
+                    // 不撤的话现场会遇到"设备报错 → 立刻重试 → 提示距上次写仅 xx ms 被拒绝",
+                    // 一个纯粹的通讯失败被当成操作太频繁。
+                    if (!success) RevertRateLimit (record.TagName, record.RateTick);
 
                     return;
                 }
             }
         }
     }
+
+    /// <summary>
+    /// 撤掉失败那次写入占用的限速名额。
+    /// 只有当时间戳**仍是这次失败尝试的时间**时才撤 —— 这期间若已有另一次成功写入
+    /// 把它更新过,撤掉就等于把合法的限速放开了。
+    /// </summary>
+    private void RevertRateLimit (string tagName, long attemptTick)
+    {
+        if (_lastWriteAt.TryGetValue (tagName, out var last) && last == attemptTick)
+        {
+            _lastWriteAt.Remove (tagName);
+        }
+    }
 }
 
-public sealed record WriteAudit (DateTime Time, string TagName, string ModuleId, object? Value, string? Outcome = null);
+/// <param name="RateTick">本次写入占用的限速名额标识(单调时钟毫秒)。失败回滚时用它精确比对,
+/// 不用 DateTime —— 与限速判定保持同一时间源。</param>
+public sealed record WriteAudit (
+    DateTime Time, string TagName, string ModuleId, object? Value, string? Outcome = null, long Id = 0, long RateTick = 0);

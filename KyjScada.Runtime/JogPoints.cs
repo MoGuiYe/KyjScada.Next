@@ -46,40 +46,67 @@ public static class JogPoints
     }
 
     /// <summary>
-    /// 名称里是否含有独立的词:按"非字母数字"或"小写→大写(驼峰)"切分。
+    /// 名称里是否含有独立的词:按"非字母数字"、"小写→大写(驼峰)"、"字母↔数字"切分。
     /// SetValue / set_value / 写入 Set / SP1 命中;Offset / Reset / SPEED 不命中。
     /// </summary>
     private static bool HasWord (string name, string word)
     {
-        var start = 0;
+        // 词的起点,-1 表示"当前不在词里"。
+        // 早先是 start=i 直接停在分隔符下标上,于是 "写入 Set" 里的 Set 被算成 4 个字符,
+        // 长度对不上、永远不命中 —— 而这句判断决定"哪些点允许被写入",漏判就是设定值写不进去。
+        var start = -1;
 
         for (var i = 0; i < name.Length; i++)
         {
             var ch = name[i];
-            var letterOrDigit = char.IsLetterOrDigit (ch);
 
-            if (i == 0 || !letterOrDigit || (char.IsUpper (ch) && char.IsLower (name[i - 1])))
+            if (!char.IsLetterOrDigit (ch))
             {
-                start = i;
+                // 分隔符:收掉前面那个词,然后从下一个字符重新开始
+                if (start >= 0 && TokenMatches (name, start, i, word)) return true;
+
+                start = -1;
+
+                continue;
             }
 
-            if (!letterOrDigit) continue;
-
-            // 只有当这个词正好到边界结束、长度又对得上时才算命中,
-            // 否则 "SPEED" 会在前两个字母处被误判成 "SP"。
-            var ends = i + 1 == name.Length
-                || !char.IsLetterOrDigit (name[i + 1])
-                || (char.IsUpper (name[i + 1]) && char.IsLower (ch));
-
-            if (!ends || i - start + 1 != word.Length) continue;
-
-            if (string.Compare (name, start, word, 0, word.Length, StringComparison.OrdinalIgnoreCase) == 0)
+            if (start < 0)
             {
-                return true;
+                start = i;
+
+                continue;
+            }
+
+            var prev = name[i - 1];
+
+            // 驼峰:小写→大写 是新词开头(SetValue → Set / Value)
+            if (char.IsUpper (ch) && char.IsLower (prev))
+            {
+                if (TokenMatches (name, start, i, word)) return true;
+
+                start = i;
+
+                continue;
+            }
+
+            // 字母↔数字 也是边界:SP1 / Set2 里的 SP / Set 要能命中,
+            // 否则下位机常见的 "SP1" 这种命名会整体漏判
+            if (char.IsDigit (ch) != char.IsDigit (prev))
+            {
+                if (TokenMatches (name, start, i, word)) return true;
+
+                start = char.IsLetter (ch) ? i : -1;
             }
         }
 
-        return false;
+        return start >= 0 && TokenMatches (name, start, name.Length, word);
+    }
+
+    /// <summary>比较 [start, end) 这段字符是否正好是 word(忽略大小写)。</summary>
+    private static bool TokenMatches (string name, int start, int end, string word)
+    {
+        return end - start == word.Length
+            && string.Compare (name, start, word, 0, word.Length, StringComparison.OrdinalIgnoreCase) == 0;
     }
 
     /// <summary>

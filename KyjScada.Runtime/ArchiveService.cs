@@ -27,6 +27,31 @@ public sealed class ArchiveService
 
     private DateTime _lastWrite = DateTime.MinValue;
 
+    /// <summary>
+    /// 上次**尝试**写库的时刻(成功失败都算)。节拍以它为准 ——
+    /// 若只在成功时推进,写库持续失败就会每个采集周期(1 秒)重试一次,
+    /// 10 秒归档退化成 1 秒,错误日志与 LastError 被刷满。
+    /// </summary>
+    private DateTime _lastAttempt = DateTime.MinValue;
+
+    /// <summary>
+    /// 节拍用的单调时钟(毫秒),与 _lastAttempt 同步推进。
+    /// 系统时间被往回校时之后 "now - _lastAttempt" 是负数,按它判节拍会一直不写;
+    /// 这时改用单调时钟兜底,归档不会停到系统时间追上为止。
+    /// </summary>
+    private long _lastTick;
+    private bool _hasTick;
+
+    /// <summary>
+    /// 上一批写库失败、还没落地的新点。失败时不清掉,下个节拍连同新点一起重写,
+    /// 否则"失败那一刻的数据"永久空洞 —— 事后看曲线是一段没有采样的空档,
+    /// 而不是一个可以补回来的缺口。
+    /// </summary>
+    private readonly List<HistoryPoint> _pending = new ();
+
+    /// <summary>待补写队列上限。写库长期失败时不能无限吃内存。</summary>
+    private const int MaxPendingPoints = 20000;
+
     /// <summary>累计写入行数(诊断用)。</summary>
     public long TotalWritten { get; private set; }
 
@@ -75,7 +100,17 @@ public sealed class ArchiveService
     /// <summary>是否到了该写库的时刻。调用方每个采集周期调一次。</summary>
     public bool ShouldWrite(DateTime now)
     {
-        return now - _lastWrite >= Interval;
+        // 从未尝试过:立刻可写
+        if (_lastAttempt == DateTime.MinValue) return true;
+
+        if (now < _lastAttempt)
+        {
+            // 时钟被往回拨(或调用方给的时刻比上次还早):按真实流逝的时间判,不看墙上时钟
+            return !_hasTick
+                || Environment.TickCount64 - _lastTick >= (long)Interval.TotalMilliseconds;
+        }
+
+        return now - _lastAttempt >= Interval;
     }
 
     /// <summary>
@@ -113,9 +148,19 @@ public sealed class ArchiveService
 
         if (points.Count == 0) return 0;
 
+        // 先补上一批没写成的点,再追加本批
+        var batch = new List<HistoryPoint>(_pending.Count + points.Count);
+        batch.AddRange(_pending);
+        batch.AddRange(points);
+
+        // 节拍无论成败都推进:失败不推进的话 10 秒归档会退化成每个采集周期(1 秒)重试,
+        // 库写不进去时每秒撞一次错误、LastError 与日志被刷满,现场反而看不到真正原因。
+        AdvancePace(sampleTime);
+
         try
         {
-            var written = _repo.WritePoints(points);
+            var written = _repo.WritePoints(batch);
+            _pending.Clear();
             _lastWrite = sampleTime;
             TotalWritten += written;
             LastError = null;
@@ -125,8 +170,27 @@ public sealed class ArchiveService
         {
             // 归档失败不能拖垮监控
             LastError = ex.Message;
+
+            _pending.AddRange(batch);
+
+            if (_pending.Count > MaxPendingPoints)
+            {
+                // 只保留最新的:老点补写价值低,而且内存必须封顶
+                _pending.RemoveRange(0, _pending.Count - MaxPendingPoints);
+            }
+
             return 0;
         }
+    }
+
+    private void AdvancePace(DateTime sampleTime)
+    {
+        // 采集时刻可能比上次的还早(补采/设备时间回退),节拍仍取较晚的那个,
+        // 否则一次时间回退会把接下来一整段的归档都放行。
+        if (sampleTime > _lastAttempt) _lastAttempt = sampleTime;
+
+        _lastTick = Environment.TickCount64;
+        _hasTick = true;
     }
 
     /// <summary>

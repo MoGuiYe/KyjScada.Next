@@ -62,7 +62,14 @@ public sealed class ModbusTcpDescriptor : IProtocolDescriptor
         }
 
         var station = parts[0];
-        var isShort = ReadBoolOption(device, "IsShortAddress", true);
+
+        // 缺省必须是 false,与 Options 里声明的默认值 "False" 一致。
+        // 原来两处相反:"新建设备"按 Options 得到 False(长地址 400001+),
+        // 而配置里**没写这个键**的老文件按 true 走(短地址 40001+),
+        // 同一份组态换个入口就得到不同的地址串,排查时极难看出差别。
+        // (两种写法最终都会被 acquisition 的 NormalizeRegister 归一,落到同一个寄存器,
+        //  所以这里统一默认值不会改动现场已在用的点位。)
+        var isShort = ReadBoolOption(device, "IsShortAddress", false);
 
         var area = parts[1][0];
 
@@ -138,7 +145,25 @@ public sealed class ModbusTcpDescriptor : IProtocolDescriptor
             return parsed;
         }
 
-        // 兼容 "1"/"0"
-        return raw == "1";
+        // 兼容 1/0、yes/no、on/off(现场有人这么填)
+        if (raw == "1") return true;
+        if (raw == "0") return false;
+
+        if (string.Equals(raw, "yes", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(raw, "on", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(raw, "是", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.Equals(raw, "no", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(raw, "off", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(raw, "否", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // 认不出来的值退回默认值,而不是悄悄按 false 处理
+        return defaultValue;
     }
 }

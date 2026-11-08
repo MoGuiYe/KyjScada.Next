@@ -20,6 +20,9 @@ public sealed class ConfigReader
     // MCP 是 Kestrel 上的多请求并发,普通 Dictionary 并发读写在极少数情况下会死循环/丢条目。
     private readonly object _cacheLock = new();
 
+    /// <summary>最近一次加载失败的原因(供工具回给调用方);成功时为 null。</summary>
+    public string? LastError { get; private set; }
+
     public ConfigReader(string settingsDir)
     {
         _settingsDir = settingsDir;
@@ -54,12 +57,49 @@ public sealed class ConfigReader
             }
         }
 
-        var bytes = File.ReadAllBytes(path);
+        LastError = null;
+
+        // 读/解析都可能失败,而且都很平常:
+        //  · 主程序正在保存组态 → 文件被独占,读会抛 IOException
+        //  · 保存到一半 → JSON 截断,Deserialize 抛 JsonException
+        // 以前这两种异常直接冒到 MCP 协议层,客户端只看到 "An error occurred",
+        // 既不知道是哪一个文件,也不知道是"正在写"还是"文件坏了"。
+        byte[] bytes;
+
+        try
+        {
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (Exception ex)
+        {
+            LastError = "读取组态文件 " + fileName + " 失败:" + ex.Message;
+
+            return null;
+        }
+
         var text = DecodeUtf8WithBom(bytes);
 
-        var list = JsonSerializer.Deserialize<List<ProjectConfig>>(text, JsonOptions);
+        List<ProjectConfig>? list;
+
+        try
+        {
+            list = JsonSerializer.Deserialize<List<ProjectConfig>>(text, JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            LastError = "组态文件 " + fileName + " 不是合法的 JSON(可能正在被改写):" + ex.Message;
+
+            return null;
+        }
+
         var project = list?.FirstOrDefault();
-        if (project == null) return null;
+
+        if (project == null)
+        {
+            LastError = "组态文件 " + fileName + " 里没有项目配置(空数组?)";
+
+            return null;
+        }
 
         lock (_cacheLock) _cache[fileName] = (project, stamp);
 

@@ -104,5 +104,48 @@ public static class AtomicFileWriteTests
             TestHelpers.AssertTrue(threw, "临时文件缺失应抛异常");
             TestHelpers.AssertStr("keep", File.ReadAllText(target), "目标不应被改动");
         });
+
+        run("原子写:兜底改名替换能成功落地", () =>
+        {
+            var target = PathOf("fallback.csv");
+            var tmp = target + ".tmp";
+
+            File.WriteAllText(target, "old");
+            File.WriteAllText(tmp, "new");
+
+            AtomicFileWrite.ReplaceViaRename(tmp, target);
+
+            TestHelpers.AssertStr("new", File.ReadAllText(target), "兜底路径也应换上新内容");
+            TestHelpers.AssertTrue(!File.Exists(tmp), "临时文件应已挪进目标");
+        });
+
+        run("原子写:兜底路径第二步失败时把旧文件改回来", () =>
+        {
+            var target = PathOf("fallback-rollback.csv");
+
+            File.WriteAllText(target, "old");
+
+            // 临时文件不存在 → 第一步(把旧文件改名腾位)成功、第二步(把新文件挪进来)失败。
+            // 这正是最危险的那个瞬间:目标位置已经空了。必须把旧文件改回原名,
+            // 否则现场看到的是一台"导出过一次就没了配置文件"的机器。
+            var threw = false;
+
+            try
+            {
+                AtomicFileWrite.ReplaceViaRename(target + ".tmp", target);
+            }
+            catch
+            {
+                threw = true;
+            }
+
+            TestHelpers.AssertTrue(threw, "新文件缺失应抛异常");
+            TestHelpers.AssertStr("old", File.ReadAllText(target), "旧文件必须被改回原名,内容不变");
+
+            var dir = Path.GetDirectoryName(target)!;
+            var leftovers = Directory.GetFiles(dir, "fallback-rollback.csv.*.old");
+
+            TestHelpers.AssertEq(0, leftovers.Length, "回滚成功后不应残留 .old 文件");
+        });
     }
 }

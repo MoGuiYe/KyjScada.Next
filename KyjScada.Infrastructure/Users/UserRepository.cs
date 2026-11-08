@@ -166,7 +166,18 @@ CREATE TABLE IF NOT EXISTS Users (
 
         if (string.IsNullOrWhiteSpace(userName)) return -1;
 
-        if (Find(userName) is not null) return -1;
+        // 先 Trim 再查重、再入库。
+        // 原来用原始输入查重、用 Trim 后的值插入:传进来 "admin "(末尾带空格)时
+        // Find("admin ") 匹配不到已存在的 "admin"(SQLite 的 NOCASE 只折叠大小写、
+        // 不去空格),随后 INSERT @n = "admin" 撞 UNIQUE 约束抛 SqliteException,
+        // 界面上表现成"新建用户直接报错退出"。
+        var name = userName.Trim();
+
+        if (name.Length > 32) return -1;   // 超长名字会撑破用户列表列宽
+
+        if (Find(name) is not null) return -1;
+
+        if (!IsAcceptablePassword(password)) return -1;
 
         var salt = PasswordHasher.NewSalt();
         var hash = PasswordHasher.Hash(password, salt);
@@ -179,7 +190,7 @@ INSERT INTO Users (UserName, PasswordHash, Salt, Iterations, Permissions, IsActi
 VALUES (@n, @h, @s, @i, @p, @a, @c, NULL);
 SELECT last_insert_rowid();";
 
-        cmd.Parameters.AddWithValue("@n", userName.Trim());
+        cmd.Parameters.AddWithValue("@n", name);
         cmd.Parameters.AddWithValue("@h", hash);
         cmd.Parameters.AddWithValue("@s", salt);
         cmd.Parameters.AddWithValue("@i", PasswordHasher.Iterations);
@@ -209,10 +220,29 @@ SELECT last_insert_rowid();";
         return cmd.ExecuteNonQuery() > 0;
     }
 
+    /// <summary>
+    /// 密码强度底线。原来**完全不校验**:空密码、单空格、1 位数字都能建号,
+    /// 而密码是现场唯一的权限边界(操作员能下发写值)。这里只做最低限度的拦截,
+    /// 更严的策略交给界面侧提示,避免把现场习惯一口气全堵死。
+    /// </summary>
+    public static bool IsAcceptablePassword (string? password)
+    {
+        if (string.IsNullOrWhiteSpace (password)) return false;
+
+        if (password.Length < 6) return false;
+
+        if (password.Length > 128) return false;   // PBKDF2 输入过长纯属浪费
+
+        return password.Trim().Length > 0;
+    }
+
     /// <summary>改密码:重新生成盐并写回哈希。</summary>
     public bool ChangePassword(string userName, string newPassword)
     {
         EnsureSchema();
+
+        // 改密码同样要过强度检查,否则"新建时拦住、改密码时又能设空"等于没拦
+        if (!IsAcceptablePassword (newPassword)) return false;
 
         var salt = PasswordHasher.NewSalt();
         var hash = PasswordHasher.Hash(newPassword, salt);

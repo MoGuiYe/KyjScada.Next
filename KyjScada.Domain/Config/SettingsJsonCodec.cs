@@ -547,54 +547,88 @@ public static class SettingsJsonCodec
         var bytes = new UTF8Encoding(false).GetBytes(json);
 
         var tmp = path + ".tmp";
+        var bak = path + ".bak";
+
         File.WriteAllBytes(tmp, bytes);
 
-        if (File.Exists(path))
-        {
-            // 备份上一次成功保存的内容(覆盖更早的 .bak)
-            try
-            {
-                File.Copy(path, path + ".bak", true);
-            }
-            catch
-            {
-                // 备份失败不阻断保存 —— 但保存本身仍走原子替换
-            }
-
-            try
-            {
-                File.Replace(tmp, path, null);
-            }
-            catch
-            {
-                // 某些文件系统不支持 Replace(或目标被占用)。先尝试覆盖式移动:
-                // Windows 上 MoveFileEx(替换已存在) 在同卷内是原子的,不会出现"目标暂时不存在"。
-                try
-                {
-                    File.Move(tmp, path, overwrite: true);
-                }
-                catch
-                {
-                    // 跨卷或被独占时只能"删除后移动",这一步天然不原子。
-                    // 删掉之后若移动失败,必须用 .bak 顶回去 ——
-                    // 否则现场会看到组态文件凭空消失,下次启动直接没有参数。
-                    try
-                    {
-                        File.Delete(path);
-                        File.Move(tmp, path);
-                    }
-                    catch
-                    {
-                        RestoreBackup(path);
-
-                        throw;
-                    }
-                }
-            }
-        }
-        else
+        if (!File.Exists(path))
         {
             File.Move(tmp, path);
+
+            return;
+        }
+
+        // 首选:原子替换,同时把旧文件留成 .bak。
+        // 备份**必须**走 Replace 的第三个参数:早先是先 File.Copy 再 Replace,
+        // 而 Copy 的失败被 catch 吞掉了 —— 备份没做成也照样往下走,
+        // 一旦走到"删除后移动"且移动又失败,RestoreBackup 找不到 .bak 就是空转,
+        // 现场表现为组态文件凭空消失。用参数则备份与替换是同一次操作,没有这个窗口。
+        try
+        {
+            File.Replace(tmp, path, bak, ignoreMetadataErrors: true);
+
+            return;
+        }
+        catch
+        {
+            // 部分文件系统(FAT/exFAT、网络盘)不支持 Replace,或被别的进程握着句柄
+        }
+
+        // 次选:覆盖式移动(同卷内原子)。这里补做一次备份,失败也不影响安全性 ——
+        // 后面所有路径都不再"先删目标",旧内容要么还在原位,要么在 .old 里。
+        try
+        {
+            File.Copy(path, bak, true);
+        }
+        catch
+        {
+            // 备份做不成不阻断保存,但下面的兜底会保证原文件不丢
+        }
+
+        try
+        {
+            File.Move(tmp, path, overwrite: true);
+
+            return;
+        }
+        catch
+        {
+            // 被独占/跨卷:进入最后的改名兜底
+        }
+
+        // 最后手段:把旧的改名腾位(改名是原子操作,内容还在),再把新的挪进来;
+        // 失败则改回原名。绝不先 File.Delete —— 那是不可恢复的。
+        var old = path + ".old";
+
+        File.Move(path, old, overwrite: true);
+
+        try
+        {
+            File.Move(tmp, path);
+        }
+        catch
+        {
+            try
+            {
+                File.Move(old, path, overwrite: true);
+            }
+            catch
+            {
+                RestoreBackup(path);
+            }
+
+            // 保留 .tmp:里面是这次要保存的新内容,删了就真没了;
+            // 下次保存会重写它,不会越积越多。
+            throw;
+        }
+
+        try
+        {
+            File.Delete(old);
+        }
+        catch
+        {
+            // 旧的删不掉只是留个文件,不影响保存结果
         }
     }
 

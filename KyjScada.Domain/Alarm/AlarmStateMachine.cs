@@ -57,6 +57,14 @@ public sealed class AlarmStateMachine
             throw new ArgumentException("报警阈值必须是有限数值", nameof(threshold));
         }
 
+        // 死区也要挡 NaN/Infinity:`deadband < 0d` 对 NaN 是 false,NaN 会平安过关,
+        // 之后消除线 = 阈值 - NaN = NaN,两条比较恒为 false —— 报警一旦触发就再也消不掉,
+        // 现场看到的是"值早就正常了,报警灯一直亮着"。
+        if (double.IsNaN(deadband) || double.IsInfinity(deadband))
+        {
+            throw new ArgumentException("报警死区必须是有限数值", nameof(deadband));
+        }
+
         if (deadband < 0d)
         {
             throw new ArgumentException("死区不能为负", nameof(deadband));

@@ -209,8 +209,35 @@ public static class UserTests
             var repo = NewRepo("dup");
             var t = new DateTime(2026, 11, 5, 9, 0, 0);
 
-            TestHelpers.AssertTrue(repo.Create("sun", "a", PermissionBit.CanView, t) > 0, "首次应成功");
-            TestHelpers.AssertEq(-1, repo.Create("sun", "b", PermissionBit.CanView, t), "重复应返回 -1");
+            TestHelpers.AssertTrue(repo.Create("sun", "pass123", PermissionBit.CanView, t) > 0, "首次应成功");
+            TestHelpers.AssertEq(-1, repo.Create("sun", "other456", PermissionBit.CanView, t), "重复应返回 -1");
+        });
+
+        run("用户库:弱密码拒绝创建", () =>
+        {
+            var repo = NewRepo("weak");
+            var t = new DateTime(2026, 11, 5, 9, 0, 0);
+
+            TestHelpers.AssertEq(-1, repo.Create("a1", "12345", PermissionBit.CanView, t), "5 位应拒绝");
+            TestHelpers.AssertEq(-1, repo.Create("a2", "   ", PermissionBit.CanView, t), "全空格应拒绝");
+            TestHelpers.AssertEq(-1, repo.Create("a3", "", PermissionBit.CanView, t), "空密码应拒绝");
+            TestHelpers.AssertTrue(repo.Create("a4", "123456", PermissionBit.CanView, t) > 0, "6 位应通过");
+            TestHelpers.AssertTrue(!repo.ChangePassword("a4", "1"), "改密码也要受强度约束");
+        });
+
+        run("用户库:用户名前后空格应先 Trim 再查重", () =>
+        {
+            var repo = NewRepo("trim");
+            var t = new DateTime(2026, 11, 5, 9, 0, 0);
+
+            TestHelpers.AssertTrue(repo.Create("admin", "pass123", PermissionBit.CanView, t) > 0, "首次应成功");
+
+            // 带空格的同名:必须在查重阶段返回 -1。
+            // 旧实现用原始输入查重、用 Trim 后的值入库,这里会撞 UNIQUE 抛异常。
+            TestHelpers.AssertEq(-1, repo.Create(" admin ", "pass123", PermissionBit.CanView, t),
+                "带空格重名应返回 -1");
+
+            TestHelpers.AssertStr("admin", repo.Find("admin")!.UserName, "入库名不应带空格");
         });
 
         run("用户库:改权限生效", () =>
@@ -218,7 +245,7 @@ public static class UserTests
             var repo = NewRepo("perm");
             var t = new DateTime(2026, 11, 5, 9, 0, 0);
 
-            repo.Create("qian", "a", PermissionBit.CanView, t);
+            repo.Create("qian", "pass123", PermissionBit.CanView, t);
 
             TestHelpers.AssertTrue(
                 repo.UpdatePermissions("qian", PermissionBit.CanView | PermissionBit.CanWrite, true),
@@ -251,7 +278,7 @@ public static class UserTests
             var repo = NewRepo("del");
             var t = new DateTime(2026, 11, 5, 9, 0, 0);
 
-            repo.Create("wu", "a", PermissionBit.CanView, t);
+            repo.Create("wu", "pass123", PermissionBit.CanView, t);
 
             TestHelpers.AssertTrue(repo.Delete("wu"), "应删除成功");
             TestHelpers.AssertTrue(repo.Find("wu") is null, "删除后应查不到");
@@ -262,10 +289,10 @@ public static class UserTests
             var repo = NewRepo("case");
             var t = new DateTime(2026, 11, 5, 9, 0, 0);
 
-            repo.Create("Admin", "a", PermissionBit.CanView, t);
+            repo.Create("Admin", "pass123", PermissionBit.CanView, t);
 
             TestHelpers.AssertTrue(repo.Find("admin") is not null, "小写应能查到");
-            TestHelpers.AssertTrue(repo.Authenticate("ADMIN", "a", t) is not null, "大写应能登录");
+            TestHelpers.AssertTrue(repo.Authenticate("ADMIN", "pass123", t) is not null, "大写应能登录");
         });
     }
 

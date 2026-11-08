@@ -31,8 +31,18 @@ public sealed class AppSettings
     /// <summary>报警确认等写入操作的最小间隔(毫秒)。</summary>
     public int WriteMinIntervalMs { get; set; } = 800;
 
-    /// <summary>是否启动内嵌 MCP 服务(关掉时端口保持不变,下次打开不用重填)。</summary>
-    public bool McpEnabled { get; set; } = true;
+    /// <summary>
+    /// 是否启动内嵌 MCP 服务(关掉时端口保持不变,下次打开不用重填)。
+    /// **默认关闭**:MCP 带写设备的能力,没在设置里明确打开之前不应该自己监听端口。
+    /// 需要外部 AI 客户端读写时,在设置窗口勾选并保存,或把 McpEnabled=1 写进 app_settings.ini。
+    /// </summary>
+    public bool McpEnabled { get; set; } = false;
+
+    /// <summary>
+    /// 读取设置时遇到"认不出但也不致命"的值(例如写错的关键字),记在这里。
+    /// 界面启动后可以提示一句,免得现场改了 ini 却不知道根本没生效。
+    /// </summary>
+    public List<string> Warnings { get; } = new ();
 
     /// <summary>
     /// 内嵌 MCP 服务端口(0 或 McpEnabled=false = 不启动)。
@@ -49,6 +59,23 @@ public sealed class AppSettings
             Directory.CreateDirectory(dir);
 
             return Path.Combine(dir, "app_settings.ini");
+        }
+    }
+
+    /// <summary>宽松解析布尔开关:1/0、true/false、on/off、yes/no(忽略大小写与首尾空白)。</summary>
+    private static bool TryParseFlag (string value, out bool result)
+    {
+        switch (value.Trim ().ToLowerInvariant ())
+        {
+            case "1": case "true": case "on": case "yes": case "启用":
+                result = true;
+                return true;
+            case "0": case "false": case "off": case "no": case "禁用": case "":
+                result = false;
+                return true;
+            default:
+                result = false;
+                return false;
         }
     }
 
@@ -119,13 +146,19 @@ public sealed class AppSettings
                         break;
 
                     case "mcpenabled":
-                        if (value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase))
+                        // 现场写法五花八门:off/no/0/False/禁用、on/yes/1/True/启用 都见过。
+                        // 早先只认 "0"/"false"/"1"/"true",写 off 的人以为关掉了,
+                        // 实际仍按默认值走 —— 现在默认是关,但"写 on 却没生效"同样会让人困惑。
+                        if (TryParseFlag (value, out var enabled))
                         {
-                            s.McpEnabled = false;
+                            s.McpEnabled = enabled;
                         }
-                        else if (value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase))
+                        else
                         {
-                            s.McpEnabled = true;
+                            s.Warnings.Add ("McpEnabled 的值 \"" + value
+                                + "\" 无法识别,按关闭处理。可用 1/0、true/false、on/off、yes/no。");
+
+                            s.McpEnabled = false;
                         }
                         break;
 
@@ -152,12 +185,12 @@ public sealed class AppSettings
     /// </summary>
     public string? Save ()
     {
+        // 先写临时文件再替换:直接覆盖写一半掉电,会把设置文件留成空文件,
+        // 下次启动就全回落默认值(归档周期、保留期一起丢)。
+        var tmp = FilePath + ".tmp";
+
         try
         {
-            // 先写临时文件再替换:直接覆盖写一半掉电,会把设置文件留成空文件,
-            // 下次启动就全回落默认值(归档周期、保留期一起丢)。
-            var tmp = FilePath + ".tmp";
-
             var sb = new StringBuilder();
 
             sb.Append("; KyjScada 应用设置(修改后重启生效)\n");
@@ -178,6 +211,17 @@ public sealed class AppSettings
         }
         catch (Exception ex)
         {
+            // 失败的 .tmp 要清掉:rtu-settings.ini 旁边长期躺着一个同内容的 .tmp
+            // 既让人以为"设置没保存成功"反复点,也可能被下次启动误读成正式配置。
+            try
+            {
+                if (File.Exists (tmp)) File.Delete (tmp);
+            }
+            catch
+            {
+                // 清理失败不改变返回给调用方的错误
+            }
+
             return ex.Message;
         }
     }

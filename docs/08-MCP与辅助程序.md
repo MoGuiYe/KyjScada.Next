@@ -2,7 +2,7 @@
 
 > **读者**：要让 AI/外部工具读写现场数据、要跑架构实证、要迁老库、要理解插件宿主现状的人。
 > **读完能做到**：知道 MCP 9 个工具的输入输出与权限边界、`KyjScada.Mcp` 为什么"自己抄表结构"、
-> `Verify` 的 6 项断言分别证明什么、`Migrate` 怎么用。
+> `Verify` 的 7 组 32 条断言分别证明什么、`Migrate` 怎么用。
 
 ---
 
@@ -83,7 +83,7 @@ KyjScada.Mcp.exe --settings ... --db ... --selftest   # 跑 9 个工具自检后
 
 ---
 
-## 5. `KyjScada.Verify`（237 行）—— 架构实证，6 项
+## 5. `KyjScada.Verify` —— 架构实证，7 组 32 条
 
 ```powershell
 .\KyjScada.Verify\bin\Debug\net8.0\KyjScada.Verify.exe

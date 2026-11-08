@@ -137,12 +137,18 @@ public sealed class DbReader
     /// 读最新值快照。新库:每个变量取最近一条(长表按 VarId 取 MAX(Id))。
     /// 老库:整行 ActualData。返回 字典: 变量名 -> 原始文本值(可能 null)。
     /// </summary>
-    public (string? InsertTime, Dictionary<string, string?> Values)? ReadLatestRow()
+    public (string? InsertTime, Dictionary<string, string?> Values, Dictionary<string, string?> Times)? ReadLatestRow()
     {
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
 
         var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        // 每个变量各自的时间戳:原来只返回"所有变量里最新的那一个",于是
+        // 一个半天没更新的点也会被报成 fresh —— 现场据此判断"设备正常",
+        // 实际那个点早就掉线了。
+        var times = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
         string? latestTime = null;
 
         if (_isNew)
@@ -159,6 +165,7 @@ public sealed class DbReader
                 var value = reader.IsDBNull(1) ? null : reader.GetDouble(1).ToString("0.######");
                 var time = reader.IsDBNull(2) ? null : reader.GetString(2);
                 values[name] = value;
+                times[name] = time;
                 if (time != null && (latestTime == null || string.CompareOrdinal(time, latestTime) > 0))
                     latestTime = time;
             }
@@ -177,11 +184,14 @@ public sealed class DbReader
                 if (name.Equals("ID", StringComparison.OrdinalIgnoreCase)) continue;
                 if (name.Equals("InsertTime", StringComparison.OrdinalIgnoreCase)) continue;
                 values[name] = reader.IsDBNull(i) ? null : Convert.ToString(reader.GetValue(i));
+
+                // 宽表的一行本来就是同一时刻,逐列沿用行时间
+                times[name] = latestTime;
             }
         }
 
         if (values.Count == 0) return null;
-        return (latestTime, values);
+        return (latestTime, values, times);
     }
 
     // ==================== 历史时序 ====================
@@ -205,6 +215,14 @@ public sealed class DbReader
         // 看起来像"这个变量没有历史数据" —— 静默误导,不如给个默认值。
         if (limit <= 0) limit = 2000;
 
+        // 上限不只是"礼貌":AI 客户端真会传 limit=100000,而下面要取
+        // limit × 变量数 行再在内存里按时刻合并 —— 不封顶就是把整个库读进进程。
+        if (limit > 2000) limit = 2000;
+
+        // 合并用的行数上限。取 2000 点 × 20 个变量 = 4 万行已经够拼出 2000 个时刻,
+        // 再多也只会被 Take(limit) 丢掉。
+        const int MaxFetchRows = 40000;
+
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
 
@@ -220,7 +238,12 @@ public sealed class DbReader
                 "ORDER BY h.SampleTime ASC LIMIT @n";
             cmd.Parameters.AddWithValue("@s", DbText(start, TimeFormat));
             cmd.Parameters.AddWithValue("@e", DbText(end, TimeFormat));
-            cmd.Parameters.AddWithValue("@n", limit * safe.Count);
+
+            // 用 long 算再夹住:limit * safe.Count 在 int 上会静默溢出成负数,
+            // SQLite 的 LIMIT 负数 = 不限,恰好是最危险的结果。
+            var fetch = (long)limit * safe.Count;
+            if (fetch > MaxFetchRows) fetch = MaxFetchRows;
+            cmd.Parameters.AddWithValue("@n", (int)fetch);
 
             var byTime = new SortedDictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
             using var reader = cmd.ExecuteReader();
@@ -288,11 +311,23 @@ public sealed class DbReader
         else
         {
             var q = "\"" + column.Replace("\"", "\"\"") + "\"";
+
+            // 只让"真能当数字看"的行参与聚合。
+            // 原来只有 GLOB '[0-9-]*'(首字符是数字或减号),于是 '--'、'12abc'、' 5'、
+            // '1.2.3' 这些老库里真实存在的脏值全部混进 CAST: '--' 变 0、'12abc' 变 12,
+            // MIN/MAX/AVG 就此失真,而工具照样报"统计正常"。
+            var strict =
+                " AND TRIM(" + q + ") = " + q +                                   // 不许首尾空格
+                " AND " + q + " NOT GLOB '*[^0-9eE+.-]*'" +                        // 只允许数字/指数/正负号/小数点
+                " AND " + q + " GLOB '*[0-9]*'" +                                 // 至少一个数字(挡 '--'、'-'、'')
+                " AND " + q + " NOT GLOB '*[.]*[.]*'" +                            // 不许两个小数点
+                " AND " + q + " NOT GLOB '*[-+]*[-+]*'" +                          // 不许两个正负号
+                " AND " + q + " NOT GLOB '*[eE]*[eE]*'";                           // 不许两个指数符号
+
             cmd.CommandText =
                 "SELECT COUNT(*), MIN(CAST(" + q + " AS REAL)), MAX(CAST(" + q + " AS REAL)), " +
                 "AVG(CAST(" + q + " AS REAL)) FROM ActualData " +
-                "WHERE InsertTime >= @s AND InsertTime <= @e " +
-                "AND " + q + " GLOB '[0-9-]*'";
+                "WHERE InsertTime >= @s AND InsertTime <= @e" + strict;
         }
 
         cmd.Parameters.AddWithValue("@s", DbText(start, TimeFormat));

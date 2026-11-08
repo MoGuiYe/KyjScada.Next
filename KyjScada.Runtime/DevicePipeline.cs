@@ -198,8 +198,20 @@ public sealed class DevicePipeline : IDisposable
             }
             catch (Exception ex)
             {
-                // 一台设备炸了不能拖死整条流水线,更不能炸掉其它设备
+                // 一台设备炸了不能拖死整条流水线,更不能炸掉其它设备。
+                // 但**致命异常不能吞**:内存/栈/元数据坏掉之后,后面每一轮采集都是在
+                // 损坏的进程状态上继续,谁也不知道读回来的值还算不算数。
+                // 这类异常往外抛,由 StopAndWait 那两处 catch(AggregateException)
+                // 把"线程异常退出"记进状态 —— 那两个分支就是为它留的。
                 LastError = ex.Message;
+
+                if (IsFatalFailure (ex))
+                {
+                    State = "线程异常退出";
+
+                    throw;
+                }
+
                 State = "异常";
             }
 
@@ -214,6 +226,15 @@ public sealed class DevicePipeline : IDisposable
         }
 
         State = "已停止";
+    }
+
+    /// <summary>判断"这一轮异常是否意味着进程状态已经不可信"。</summary>
+    private static bool IsFatalFailure(Exception ex)
+    {
+        return ex is OutOfMemoryException
+            or AccessViolationException
+            or InsufficientExecutionStackException
+            or BadImageFormatException;
     }
 
     public void Dispose()

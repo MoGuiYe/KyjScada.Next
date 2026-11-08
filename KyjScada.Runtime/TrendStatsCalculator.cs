@@ -101,7 +101,10 @@ public static class TrendStatsCalculator
 
         for (int i = stride; i < points.Count && diffs.Count < n; i += stride)
         {
-            var d = (points[i].Time - points[i - stride].Time).TotalSeconds;
+            // 抽样是每隔 stride 个点取一对,时间差要除以 stride 才是**相邻两点**的间隔。
+            // 不除的话中位间隔被放大 stride 倍(20000 点算 stride=39 → 阈值 39 倍),
+            // 于是真正的断档全被当成正常采样间隔,缺失时长恒等于 0。
+            var d = (points[i].Time - points[i - stride].Time).TotalSeconds / stride;
             if (d > 0) diffs.Add(d);
         }
 
@@ -118,8 +121,8 @@ public static class TrendStatsCalculator
     /// <param name="points">已按时间升序的桶序列。</param>
     /// <param name="from">区间起点(含)。</param>
     /// <param name="to">区间终点(含)。</param>
-    /// <param name="highLimit">上限,null 或 0 表示未配置。</param>
-    /// <param name="lowLimit">下限,null 或 0 表示未配置。</param>
+    /// <param name="highLimit">上限。null = 未配置;0 是**合法限值**(如"温度上限 0 度")。</param>
+    /// <param name="lowLimit">下限。null = 未配置;0 是合法限值。</param>
     public static TrendStats Compute(
         IReadOnlyList<TrendBucket> points, DateTime from, DateTime to,
         double? highLimit, double? lowLimit)
@@ -216,8 +219,11 @@ public static class TrendStatsCalculator
 
     private static bool IsOver(double v, double? high, double? low)
     {
-        if (high.HasValue && high.Value != 0 && v > high.Value) return true;
-        if (low.HasValue && low.Value != 0 && v < low.Value) return true;
+        // 只看 HasValue:把 0 当"未配置"会让"上限 0"的测点永远不算超限,
+        // 超限时长/合格时长/切换次数整组失真(而且现场恰好有 0 作限值的量,如温差、偏移)。
+        // 未配置由调用方传 null 表达(MainWindow.BuildRangeStats 已经是这么传的)。
+        if (high.HasValue && v > high.Value) return true;
+        if (low.HasValue && v < low.Value) return true;
 
         return false;
     }

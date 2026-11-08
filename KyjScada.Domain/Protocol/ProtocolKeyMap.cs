@@ -8,15 +8,28 @@ namespace KyjScada.Domain.Protocol;
 /// </summary>
 public static class ProtocolKeyMap
 {
-    /// <summary>Modbus 家族:用功能码读。</summary>
-    public static bool IsModbusFamily (string protocolKey)
+    /// <summary>
+    /// 协议键比较一律**忽略大小写**。
+    /// 组态文件是人手写的,现场出现过 "modbusTCP"、"MODBUSRTU" 这类写法;
+    /// 按大小写敏感比较会判成"未知协议",采集器于是交给别的分支去处理,
+    /// 表现是"配置全对但一个点都采不上"。
+    /// </summary>
+    private static bool Is (string? protocolKey, params string[] keys)
     {
         if (protocolKey is null) return false;
 
-        return protocolKey == "ModbusTCP"
-            || protocolKey == "ModbusRTU"
-            || protocolKey == "ModbusRTUOverTCP"
-            || protocolKey == "ModbusASCII";
+        foreach (var key in keys)
+        {
+            if (string.Equals (protocolKey, key, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Modbus 家族:用功能码读。</summary>
+    public static bool IsModbusFamily (string protocolKey)
+    {
+        return Is (protocolKey, "ModbusTCP", "ModbusRTU", "ModbusRTUOverTCP", "ModbusASCII");
     }
 
     /// <summary>
@@ -25,39 +38,23 @@ public static class ProtocolKeyMap
     /// </summary>
     public static bool IsSiemensFamily (string protocolKey)
     {
-        if (protocolKey is null) return false;
-
-        return protocolKey == "Siemens"
-            || protocolKey == "SiemensS7_1200"
-            || protocolKey == "SiemensS7_1500"
-            || protocolKey == "SiemensS7_200Smart"
-            || protocolKey == "SiemensS7_300";
+        return Is (protocolKey, "Siemens", "SiemensS7_1200", "SiemensS7_1500",
+            "SiemensS7_200Smart", "SiemensS7_300");
     }
 
     public static bool IsMelsecFamily (string protocolKey)
     {
-        if (protocolKey is null) return false;
-
-        return protocolKey == "Melsec"
-            || protocolKey == "MelsecFXSerial"
-            || protocolKey == "MelsecMcBinary"
-            || protocolKey == "MelsecMcAscii";
+        return Is (protocolKey, "Melsec", "MelsecFXSerial", "MelsecMcBinary", "MelsecMcAscii");
     }
 
     public static bool IsOmronFamily (string protocolKey)
     {
-        if (protocolKey is null) return false;
-
-        return protocolKey == "Omron"
-            || protocolKey == "OmronHostlink"
-            || protocolKey == "OmronFinsTcp";
+        return Is (protocolKey, "Omron", "OmronHostlink", "OmronFinsTcp");
     }
 
     public static bool IsOpcFamily (string protocolKey)
     {
-        if (protocolKey is null) return false;
-
-        return protocolKey == "OPCDA" || protocolKey == "OPCUA";
+        return Is (protocolKey, "OPCDA", "OPCUA");
     }
 
     /// <summary>
@@ -69,8 +66,6 @@ public static class ProtocolKeyMap
     /// </summary>
     public static bool IsImplementedInV1 (string protocolKey)
     {
-        return protocolKey == "ModbusTCP"
-            || protocolKey == "ModbusRTU"
-            || protocolKey == "ModbusRTUOverTCP";
+        return Is (protocolKey, "ModbusTCP", "ModbusRTU", "ModbusRTUOverTCP");
     }
 }

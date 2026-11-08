@@ -57,9 +57,19 @@ public sealed class XlsxSheet
 /// </summary>
 public static class XlsxWriter
 {
+    /// <summary>xlsx(Excel 2007+)的硬上限:16384 列 / 1048576 行。</summary>
+    public const int MaxColumns = 16384;
+
+    /// <summary>同上:每张表最多 1048576 行(含标题行与表头行)。</summary>
+    public const int MaxRows = 1048576;
+
     public static void Write(string path, params XlsxSheet[] sheets)
     {
         if (sheets.Length == 0) throw new ArgumentException("至少需要一个工作表", nameof(sheets));
+
+        // 超限必须在写文件之前拦下:写出去的文件 Excel 会报"内容有问题"并做修复,
+        // 用户看到的是"导出成功"却打不开 —— 提前抛,界面上至少能显示真实原因。
+        foreach (var sheet in sheets) CheckLimits (sheet);
 
         var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
@@ -80,33 +90,10 @@ public static class XlsxWriter
                 }
             }
 
-            // 先写临时文件再原子替换:导出到一半断电不会留下半截 xlsx
-            if (File.Exists(path))
-            {
-                try
-                {
-                    File.Replace(tmp, path, null);
-                }
-                catch
-                {
-                    // Replace 在部分文件系统/被占用时不可用。先试覆盖式移动(同卷内原子),
-                    // 实在不行才"删除后移动" —— 那一步不原子,失败时旧报表就没了,
-                    // 所以只作为最后手段。
-                    try
-                    {
-                        File.Move(tmp, path, overwrite: true);
-                    }
-                    catch
-                    {
-                        File.Delete(path);
-                        File.Move(tmp, path);
-                    }
-                }
-            }
-            else
-            {
-                File.Move(tmp, path);
-            }
+            // 先写临时文件再原子替换:导出到一半断电不会留下半截 xlsx。
+            // 替换细节(含"目标被 Excel 占用"的兜底)统一在 AtomicFileWrite 里,
+            // 这里不再自己写 Delete→Move —— 那一步失败会把旧报表一起弄丢。
+            AtomicFileWrite.Replace(tmp, path);
         }
         catch
         {
@@ -115,6 +102,25 @@ public static class XlsxWriter
             TryDelete(tmp);
 
             throw;
+        }
+    }
+
+    private static void CheckLimits(XlsxSheet sheet)
+    {
+        if (sheet.Columns.Count > MaxColumns)
+        {
+            throw new ArgumentException(
+                "工作表「" + sheet.Name + "」有 " + sheet.Columns.Count + " 列,超过 Excel 上限 "
+                + MaxColumns + " 列。请减少导出列或拆分导出。");
+        }
+
+        var total = sheet.TitleLines.Count + 1 + sheet.Rows.Count;
+
+        if (total > MaxRows)
+        {
+            throw new ArgumentException(
+                "工作表「" + sheet.Name + "」需要 " + total + " 行,超过 Excel 上限 "
+                + MaxRows + " 行。请缩短时间范围或加大统计粒度后再导出。");
         }
     }
 
@@ -231,12 +237,16 @@ public static class XlsxWriter
                "<top style=\"thin\"><color rgb=\"FFB0B0B0\"/></top><bottom style=\"thin\"><color rgb=\"FFB0B0B0\"/></bottom><diagonal/></border>" +
                "</borders>" +
                "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" +
-               "<cellXfs count=\"4\">" +
+               "<cellXfs count=\"5\">" +
                "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" applyBorder=\"1\"/>" +
                "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"1\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\">" +
                "<alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>" +
                "<xf numFmtId=\"0\" fontId=\"2\" fillId=\"0\" borderId=\"0\" applyFont=\"1\"/>" +
                "<xf numFmtId=\"2\" fontId=\"0\" fillId=\"0\" borderId=\"1\" applyBorder=\"1\" applyNumberFormat=\"1\"/>" +
+               // 日期样式:numFmtId=22 是内置的 "m/d/yy h:mm"。
+               // DateTime 写成日期序列号 + 这个样式,Excel 里才是可排序/可计算的日期,
+               // 而不是一列认不出来的文本。
+               "<xf numFmtId=\"22\" fontId=\"0\" fillId=\"0\" borderId=\"1\" applyBorder=\"1\" applyNumberFormat=\"1\"/>" +
                "</cellXfs>" +
                // 必须有 cellStyleXfs + cellStyles(Normal),否则 openpyxl/WPS 会提示"缺少默认样式"
                "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>" +
@@ -319,17 +329,49 @@ public static class XlsxWriter
                     continue;
                 }
 
-                if (value is double || value is float || value is int || value is long || value is decimal)
+                // 日期走日期样式:写日期序列号 + numFmtId=22。
+                // 原来 DateTime 落到文本分支,导出后是一列"2026-11-08 10:00:00"的死文本,
+                // 在 Excel 里既不能排序也不能做日期计算,做周报的人只能手工再转一遍。
+                if (value is DateTime dt)
                 {
+                    sb.Append("<c r=\"").Append(reference).Append("\" s=\"4\"><v>")
+                      .Append(dt.ToOADate().ToString("R", CultureInfo.InvariantCulture))
+                      .Append("</v></c>");
+
+                    continue;
+                }
+
+                if (value is DateTimeOffset dto)
+                {
+                    sb.Append("<c r=\"").Append(reference).Append("\" s=\"4\"><v>")
+                      .Append(dto.DateTime.ToOADate().ToString("R", CultureInfo.InvariantCulture))
+                      .Append("</v></c>");
+
+                    continue;
+                }
+
+                if (TryAsNumber(value, out var number))
+                {
+                    // NaN/Infinity 写不进 <v>:Excel 会判定文件损坏并放弃打开。
+                    // 按文本写出来,人还能看见"这一格是脏值",表也不会坏。
+                    if (double.IsNaN(number) || double.IsInfinity(number))
+                    {
+                        sb.Append("<c r=\"").Append(reference).Append("\" s=\"0\" t=\"inlineStr\"><is><t>")
+                          .Append(number.ToString(CultureInfo.InvariantCulture))
+                          .Append("</t></is></c>");
+
+                        continue;
+                    }
+
                     sb.Append("<c r=\"").Append(reference).Append("\" s=\"3\"><v>")
-                      .Append(Convert.ToDouble(value, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture))
+                      .Append(number.ToString("R", CultureInfo.InvariantCulture))
                       .Append("</v></c>");
 
                     continue;
                 }
 
                 sb.Append("<c r=\"").Append(reference).Append("\" s=\"0\" t=\"inlineStr\"><is><t>")
-                  .Append(Escape(value.ToString() ?? ""))
+                  .Append(Escape(Convert.ToString(value, CultureInfo.InvariantCulture) ?? ""))
                   .Append("</t></is></c>");
             }
 
@@ -348,6 +390,56 @@ public static class XlsxWriter
         sb.Append("</worksheet>");
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 判断一个格子值能不能当数字写。
+    /// 原来是写死 double/float/int/long/decimal 五种,组态里 long?、short、uint、
+    /// 甚至自定义的 IConvertible 数值类型全部退化成文本列,汇总/求和全失效。
+    /// </summary>
+    private static bool TryAsNumber(object value, out double number)
+    {
+        number = 0;
+
+        switch (value)
+        {
+            case double d: number = d; return true;
+            case float f: number = f; return true;
+            case decimal m: number = (double)m; return true;
+            case int i: number = i; return true;
+            case long l: number = l; return true;
+            case short s: number = s; return true;
+            case byte b: number = b; return true;
+            case sbyte sb: number = sb; return true;
+            case ushort us: number = us; return true;
+            case uint ui: number = ui; return true;
+            case ulong ul: number = ul; return true;
+        }
+
+        // 兜底:自定义类型实现了 IConvertible 且是数值 TypeCode 的也当数字。
+        // bool/char/string/DateTime 不在此列(bool 写成 TRUE/FALSE 更符合人的直觉)。
+        if (value is IConvertible conv)
+        {
+            switch (conv.GetTypeCode())
+            {
+                case TypeCode.Byte:
+                case TypeCode.SByte:
+                case TypeCode.Int16:
+                case TypeCode.UInt16:
+                case TypeCode.Int32:
+                case TypeCode.UInt32:
+                case TypeCode.Int64:
+                case TypeCode.UInt64:
+                case TypeCode.Single:
+                case TypeCode.Double:
+                case TypeCode.Decimal:
+                    number = conv.ToDouble(CultureInfo.InvariantCulture);
+
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>列号 → 字母(A..Z, AA..)。</summary>

@@ -218,20 +218,23 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         }
 
         ushort[] raw;
+        bool[] arrived;
 
         try
         {
+            var spans = Spans (vars, baseOffset);
+
             if (fn == ModbusFunction.ReadCoils)
             {
-                raw = CoilsToWords (ReadCoilsChunked (baseOffset, length));
+                raw = CoilsToWords (ReadCoilsChunked (baseOffset, length, spans, out arrived));
             }
             else if (fn == ModbusFunction.ReadInputRegisters)
             {
-                raw = ReadInputRegistersChunked (baseOffset, length);
+                raw = ReadRegistersChunked (baseOffset, length, spans, true, out arrived);
             }
             else
             {
-                raw = ReadHoldingRegistersChunked (baseOffset, length);
+                raw = ReadRegistersChunked (baseOffset, length, spans, false, out arrived);
             }
         }
         catch (Exception ex)
@@ -259,7 +262,11 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             var rel = abs - baseOffset;
 
-            var val = rel < 0 ? null : ExtractVar (raw, v, fn, rel, bit, _device.WordOrder);
+            // 这个点要的那几个寄存器是否都真的到了(短响应时后面的点可能没到)
+            var need = fn == ModbusFunction.ReadCoils || bit >= 0 ? 1 : RegisterCount (v);
+            var complete = rel >= 0 && rel + need <= arrived.Length && AllArrived (arrived, rel, need);
+
+            var val = complete ? ExtractVar (raw, v, fn, rel, bit, _device.WordOrder) : null;
             var ok = val.HasValue;
             var tv = new TagValue (v.VarName, ok ? val.Value : null, ok ? TagQuality.Good : TagQuality.NotCollected, t);
             batch[v.VarName] = tv;
@@ -267,6 +274,16 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         }
 
         return okCount;
+    }
+
+    private static bool AllArrived (bool[] arrived, int offset, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            if (!arrived[offset + i]) return false;
+        }
+
+        return true;
     }
 
     private static void FailAll (List<VariableConfig> vars, Dictionary<string, TagValue> batch, DateTime t)
@@ -284,52 +301,138 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     private const int MaxCoilsPerRead = 2000;
 
     /// <summary>
-    /// 按协议上限分段读寄存器。
-    /// 以前直接用组跨度读,组里超过 125 个(或线圈超过 2000)时从站会返回非法数据长度,
-    /// 整组一起失败 —— 现场表现为"这一大片点全是通讯失败"。
+    /// 分帧计划:把 [0, count) 切成每帧不超过 <paramref name="maxPerChunk"/> 的若干段。
+    ///
+    /// 两条硬约束:
+    ///  1. **不能把多寄存器变量劈在两帧里**。32 位值(2 寄存器)/64 位值(4 寄存器)
+    ///     若前一半取自这一帧、后一半取自下一帧,两次读取之间设备值变了,拼出来的是一个
+    ///     从未真实存在过的数 —— 现场表现是"偶尔蹦出一个离谱的值"。
+    ///     所以边界落在一个变量的中间时,把本帧截短到它的起点。
+    ///  2. 每帧的绝对地址必须留在 16 位地址空间内。组起始 65500、长度 200 时,
+    ///     第二帧地址会 (ushort) 回绕成 89 —— 不报错,但读到的是**别的点位**,
+    ///     比读失败危险得多。
     /// </summary>
-    private ushort[] ReadHoldingRegistersChunked (ushort start, int count)
+    private static List<(int Offset, int Length)> PlanChunks (
+        int count, int maxPerChunk, IReadOnlyList<(int Offset, int Length)> spans)
+    {
+        var plan = new List<(int, int)> ();
+        var done = 0;
+
+        while (done < count)
+        {
+            var take = Math.Min (maxPerChunk, count - done);
+
+            foreach (var s in spans)
+            {
+                if (s.Length <= 1) continue;                      // 单寄存器/位点不会跨帧
+                if (s.Offset <= done || s.Offset >= done + take) continue;
+                if (s.Offset + s.Length <= done + take) continue; // 完整落在本帧内
+
+                // 这个变量跨过了本帧末尾:截短到它的起点
+                take = s.Offset - done;
+            }
+
+            // 变量本身比单帧上限还长(理论上不会发生)时不能退化成死循环
+            if (take <= 0) take = Math.Min (maxPerChunk, count - done);
+
+            plan.Add((done, take));
+            done += take;
+        }
+
+        return plan;
+    }
+
+    /// <summary>帧地址边界检查:越界就明确报错,绝不静默回绕到别的点位。</summary>
+    private static void CheckAddress (int address, int count)
+    {
+        if (address < 0 || address + count > 0x10000)
+        {
+            throw new ArgumentOutOfRangeException (
+                nameof (address),
+                "组地址越界:" + address + " + " + count + " 超出 Modbus 16 位地址空间,请检查组配置");
+        }
+    }
+
+    /// <summary>组内所有"多寄存器变量"的跨度(相对组起点的偏移),给 <see cref="PlanChunks"/> 用。</summary>
+    private static List<(int Offset, int Length)> Spans (List<VariableConfig> vars, int baseOffset)
+    {
+        var spans = new List<(int, int)> ();
+
+        foreach (var v in vars)
+        {
+            var abs = VarOffset (v);
+            if (abs < 0) continue;
+
+            var rel = abs - baseOffset;
+            if (rel < 0) continue;
+
+            spans.Add((rel, RegisterCount (v)));
+        }
+
+        return spans;
+    }
+
+    /// <summary>
+    /// 按协议上限分段读寄存器。
+    ///
+    /// <paramref name="arrived"/> 标出哪些位置真的读到了:从站返回的寄存器数比请求少时
+    /// (老旧从站、最后一个不完整的缓冲区),原来直接 Array.Copy(take) 会抛异常,
+    /// 整组一起变成"通讯失败" —— 一百多个点全红,只因为最后一帧少了一个寄存器。
+    /// 现在按实到的长度拷贝,点位级判断"我这几个寄存器到齐没有"。
+    /// </summary>
+    private ushort[] ReadRegistersChunked (
+        int start, int count, IReadOnlyList<(int Offset, int Length)> spans, bool input, out bool[] arrived)
     {
         var all = new ushort[count];
+        arrived = new bool[count];
 
-        for (var done = 0; done < count; done += MaxRegistersPerRead)
+        foreach (var (offset, take) in PlanChunks (count, MaxRegistersPerRead, spans))
         {
-            var take = Math.Min (MaxRegistersPerRead, count - done);
-            var part = _client.ReadHoldingRegisters ((ushort)(start + done), (ushort)take);
+            CheckAddress (start + offset, take);
 
-            Array.Copy (part, 0, all, done, take);
+            var part = input
+                ? _client.ReadInputRegisters ((ushort)(start + offset), (ushort)take)
+                : _client.ReadHoldingRegisters ((ushort)(start + offset), (ushort)take);
+
+            var got = part is null ? 0 : Math.Min (part.Length, take);
+
+            if (got > 0) Array.Copy (part!, 0, all, offset, got);
+
+            for (var i = 0; i < got; i++) arrived[offset + i] = true;
+
+            if (got < take)
+            {
+                LastError ??= "从站返回的寄存器数不足(" + got + "/" + take
+                    + "),地址 " + (start + offset) + " 之后的点按未采集处理";
+            }
         }
 
         return all;
     }
 
-    /// <summary>按协议上限分段读输入寄存器。</summary>
-    private ushort[] ReadInputRegistersChunked (ushort start, int count)
-    {
-        var all = new ushort[count];
-
-        for (var done = 0; done < count; done += MaxRegistersPerRead)
-        {
-            var take = Math.Min (MaxRegistersPerRead, count - done);
-            var part = _client.ReadInputRegisters ((ushort)(start + done), (ushort)take);
-
-            Array.Copy (part, 0, all, done, take);
-        }
-
-        return all;
-    }
-
-    /// <summary>按协议上限分段读线圈。</summary>
-    private bool[] ReadCoilsChunked (ushort start, int count)
+    /// <summary>按协议上限分段读线圈(判定口径同 <see cref="ReadRegistersChunked"/>)。</summary>
+    private bool[] ReadCoilsChunked (
+        int start, int count, IReadOnlyList<(int Offset, int Length)> spans, out bool[] arrived)
     {
         var all = new bool[count];
+        arrived = new bool[count];
 
-        for (var done = 0; done < count; done += MaxCoilsPerRead)
+        foreach (var (offset, take) in PlanChunks (count, MaxCoilsPerRead, spans))
         {
-            var take = Math.Min (MaxCoilsPerRead, count - done);
-            var part = _client.ReadCoils ((ushort)(start + done), (ushort)take);
+            CheckAddress (start + offset, take);
 
-            Array.Copy (part, 0, all, done, take);
+            var part = _client.ReadCoils ((ushort)(start + offset), (ushort)take);
+            var got = part is null ? 0 : Math.Min (part.Length, take);
+
+            if (got > 0) Array.Copy (part!, 0, all, offset, got);
+
+            for (var i = 0; i < got; i++) arrived[offset + i] = true;
+
+            if (got < take)
+            {
+                LastError ??= "从站返回的线圈数不足(" + got + "/" + take
+                    + "),地址 " + (start + offset) + " 之后的点按未采集处理";
+            }
         }
 
         return all;
@@ -854,9 +957,17 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                     return true;
                 }
 
-                _client.WriteRegister (writeAddress, rawValue != 0 ? (ushort)1 : (ushort)0);
-                LastError = null;
-                return true;
+                // 寄存器区的 Bool **必须**带位号(4xxxx.NN)。
+                // 早先这里直接 WriteRegister(0 或 1),等于把整字写死:
+                // 一个寄存器常按位打包 16 个状态/命令,写一个 Bool 会把其余 15 位清零,
+                // 现场表现是"改了一个开关,旁边十几个点全掉了" —— 而且读回来一切正常,
+                // 很难查到是这里。
+                // Modbus 也没有"写某一位"的功能码,只能读-改-写,还得防并发覆盖;
+                // 无位号时无从知道该动哪一位,所以明确拒绝并提示怎么改配置。
+                error = "Bool 变量 " + target.Start + " 落在寄存器区,整字写入会清零其余位;"
+                    + "请在地址后加位号(如 40010.03),或改用 0xxxx 线圈";
+
+                return false;
             }
 
             // 写入前用与读取相反的字节序做编码,保证读回来值不变

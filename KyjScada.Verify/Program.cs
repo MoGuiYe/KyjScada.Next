@@ -22,6 +22,7 @@ public static class Program
         await Test4_WriteConflict ();
         await Test5_NullSemantics ();
         await Test6_SnapshotConsistency ();
+        await Test7_ProviderOrder ();
 
         Console.WriteLine ($"\n==== 结果: 通过 {_pass} / 失败 {_fail} / 合计 {_pass + _fail} ====");
 
@@ -235,5 +236,66 @@ public static class Program
         Check ("同一快照内版本号一致", snap1.Version == 1, "");
 
         Console.WriteLine ();
+    }
+
+    /// <summary>
+    /// 测试7:拓扑顺序靠**显式声明的服务提供者**,不靠模块 Id 猜服务名;
+    /// 同时验证重复 Id 不会把整个宿主加载打成异常。
+    /// </summary>
+    private static Task Test7_ProviderOrder ()
+    {
+        Console.WriteLine ("-- 测试7: 依赖排序与重复 Id --");
+
+        var log = new HostLogger (sink: e => Console.WriteLine ("   " + e));
+        var host = new ModuleHost (log, new DictConfigSource ());
+
+        var bus = new ValueBus ();
+
+        // 声明 IValueReader 由 collector 提供:trend.realtime 依赖它,必须排在后面
+        host.Provide<IValueReader> (bus, "collector");
+        host.Provide<IValueWriter> (bus, "collector");
+        host.Provide<IValueBus> (bus, "collector");
+
+        // 故意把依赖方放在数组前面
+        var modules = new IModule[] { new TrendModule (), new CollectorModule () };
+
+        var report = host.Load (modules);
+
+        Check ("依赖方排在提供者之后",
+            report.Loaded.Count == 2 && report.Loaded[0] == "collector" && report.Loaded[1] == "trend.realtime",
+            string.Join (",", report.Loaded));
+
+        // 重复 Id:两个 collector。原来 ToDictionary 会抛 ArgumentException,
+        // 而它在 per-module try 外面 —— 整个加载直接崩,报告里一条记录都没有。
+        var log2 = new HostLogger (sink: _ => { });
+        var host2 = new ModuleHost (log2, new DictConfigSource ());
+
+        host2.Provide<IValueReader> (bus, "collector");
+        host2.Provide<IValueWriter> (bus, "collector");
+        host2.Provide<IValueBus> (bus, "collector");
+
+        LoadReport dup;
+
+        try
+        {
+            dup = host2.Load (new IModule[] { new CollectorModule (), new CollectorModule () });
+        }
+        catch (Exception ex)
+        {
+            Check ("重复 Id 不抛异常", false, ex.GetType ().Name + ": " + ex.Message);
+
+            Console.WriteLine ();
+
+            return Task.CompletedTask;
+        }
+
+        Check ("重复 Id 不抛异常", true, "");
+        Check ("重复 Id 被报告", dup.Rejected.Count == 1 && dup.Rejected[0].Reason.Contains ("重复"),
+            dup.Rejected.Count == 1 ? dup.Rejected[0].Reason : "rejected=" + dup.Rejected.Count);
+        Check ("重复 Id 只加载一个", dup.Loaded.Count == 1, string.Join (",", dup.Loaded));
+
+        Console.WriteLine ();
+
+        return Task.CompletedTask;
     }
 }

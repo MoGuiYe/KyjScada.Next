@@ -22,6 +22,7 @@ public static class TrendAggregatorTests
         RunEmptyBucket(run);
         RunEnvelope(run);
         RunThinRaw(run);
+        RunBucketCap(run);
     }
 
     private static HistoryRecord Rec(DateTime t, double v, int q = HistoryQuality.Good)
@@ -315,6 +316,56 @@ public static class TrendAggregatorTests
 
             TestHelpers.AssertTrue(Math.Abs(b[0].Value - 2) < 1e-9, "代表值应是最小 2");
             TestHelpers.AssertTrue(Math.Abs(b[0].Max - 100) < 1e-9, "但包络最大仍是 100");
+        });
+    }
+
+    /// <summary>
+    /// 桶数上限(MaxRawPoints = 20000)触发时的行为。
+    ///
+    /// 这条最容易写错:只把桶数砍到 20000、却不放大间隔,后面 idx >= bucketCount
+    /// 的钳位会把**所有**超出的点塞进最后一桶 —— 图上表现为"最后一根柱子异常粗",
+    /// 而前面 19999 个桶全空,看起来像设备在那段时间掉线。
+    /// 正确的做法是砍桶数的同时把间隔按 跨度/桶数 放大,让 20000 个桶仍然均匀覆盖全区间。
+    /// </summary>
+    private static void RunBucketCap(Action<string, Action> run)
+    {
+        run("桶数上限:20001 秒 / 1 秒间隔被压到 20000 桶且间隔放大", () =>
+        {
+            var from = new DateTime(2026, 11, 5, 0, 0, 0);
+            var to = from.AddSeconds(20001);
+
+            // 每秒 0.1 秒一个点会造 20 万个点,太慢;这里每 100 秒放一个点,
+            // 只要保证"点被均匀分到不同桶"就能验证有没有挤成一堆。
+            var raw = new List<HistoryRecord>();
+
+            for (var s = 0; s <= 20000; s += 100) raw.Add(Rec(from.AddSeconds(s), s));
+
+            var buckets = TrendAggregator.Aggregate(raw, from, to, 1.0, TrendAggregate.Average);
+
+            TestHelpers.AssertEq(TrendAggregator.MaxRawPoints, buckets.Count, "桶数应被压到上限");
+
+            var sum = 0;
+            var maxPerBucket = 0;
+
+            foreach (var b in buckets)
+            {
+                sum += b.Count;
+                if (b.Count > maxPerBucket) maxPerBucket = b.Count;
+            }
+
+            TestHelpers.AssertEq(raw.Count, sum, "所有点都必须落到某个桶里,不能丢");
+            TestHelpers.AssertTrue(maxPerBucket <= 2,
+                "点不应被挤进同一个巨型桶,最大单桶点数实际 " + maxPerBucket);
+
+            // 间隔必须真的被放大(20001/20000),否则 20000 个桶覆盖不满 20001 秒
+            var span = (buckets[^1].Time - buckets[0].Time).TotalSeconds;
+            TestHelpers.AssertTrue(Math.Abs(span - 20001 * 19999d / 20000d) < 1.0,
+                "最后一个桶的时间应约等于 起点 + 19999×放大间隔,实际跨度 " + span);
+
+            for (var i = 1; i < buckets.Count; i++)
+            {
+                if (buckets[i].Time <= buckets[i - 1].Time) throw new Exception("桶时间必须严格递增");
+            }
         });
     }
 

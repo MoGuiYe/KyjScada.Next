@@ -92,6 +92,11 @@ public static class Program
             .WithTools<WriteTools>();
 
         var app = builder.Build();
+
+        // 必须先 Clear:进程环境里若有 ASPNETCORE_URLS(从服务/脚本继承过来很常见),
+        // Kestrel 会**同时**监听那个地址 —— 可能是 0.0.0.0:5000,等于把只读库和
+        // (本进程里的)写工具一起放到网络上。Clear 之后只剩下面这一条回环地址。
+        app.Urls.Clear();
         app.Urls.Add($"http://127.0.0.1:{port}");
         app.MapMcp("/mcp");
 

@@ -258,7 +258,10 @@ public sealed class LegacyMigrator
 
         using (var cmd = legacy.CreateCommand())
         {
-            cmd.CommandText = "select name from sqlite_master where type='table' and name='" + LogTable + "'";
+            // 表名走参数:LogTable 是 public setter,拼进 SQL 既有注入面,
+            // 表名里带单引号时还会直接语法错误。
+            cmd.CommandText = "select name from sqlite_master where type='table' and name = $n";
+            cmd.Parameters.AddWithValue("$n", LogTable);
 
             if (cmd.ExecuteScalar() is null)
             {
@@ -295,6 +298,19 @@ public sealed class LegacyMigrator
 
         report.SysLogTableCreated = true;
 
+        // 重跑保护:LegacySysLog 没有主键,直接再插一遍会把日志整份翻倍,
+        // 而长表/日志表是只增不改的,翻倍之后没法分辨哪份是真的。
+        // 整表是在一个事务里写完的 —— 中途失败会整体回滚、表仍为空 ——
+        // 所以"表里已经有行"就说明上一次已经迁完,这次直接跳过。
+        var existing = CountRows(target, "LegacySysLog");
+
+        if (existing > 0)
+        {
+            report.Warnings.Add("LegacySysLog 已有 " + existing + " 行,跳过重复迁移(重跑不会翻倍)");
+
+            return 0;
+        }
+
         var written = 0;
 
         using var tx = target.BeginTransaction();
@@ -308,8 +324,10 @@ public sealed class LegacyMigrator
             using var ins = target.CreateCommand();
 
             ins.Transaction = tx;
+            // OR IGNORE 是第二道防线:万一将来给 LegacySysLog 加了唯一索引,
+            // 重复行也不会让整次迁移在第 3000 行抛异常中断。
             ins.CommandText =
-                "INSERT INTO LegacySysLog (" + string.Join(", ", cols.Select(Quote)) + ") " +
+                "INSERT OR IGNORE INTO LegacySysLog (" + string.Join(", ", cols.Select(Quote)) + ") " +
                 "VALUES (" + string.Join(", ", cols.Select((_, i) => "$p" + i)) + ")";
 
             var pars = cols.Select((_, i) => ins.Parameters.Add("$p" + i, SqliteType.Text)).ToList();
@@ -330,6 +348,22 @@ public sealed class LegacyMigrator
         return written;
     }
 
+    /// <summary>数一张表的行数(表不存在返回 0)。</summary>
+    private static long CountRows(SqliteConnection conn, string table)
+    {
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM " + Quote(table);
+
+            return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+        catch (SqliteException)
+        {
+            return 0;
+        }
+    }
+
     private static string Quote(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";
 
     private static bool TryParseValue(string raw, out double value)
@@ -343,7 +377,14 @@ public sealed class LegacyMigrator
             return false;
         }
 
-        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value)) return false;
+
+        // "Infinity"/"-Infinity" 是 double.TryParse 认的合法输入,"1e999" 也会溢出成 Infinity。
+        // 这类值一旦写进历史库,趋势图纵轴被拉成无限,聚合出来的平均/最大全是 NaN,
+        // 而长表是只增不改的 —— 事后只能删库重来。宁可当脏值跳过并计数。
+        if (double.IsNaN(value) || double.IsInfinity(value)) return false;
+
+        return true;
     }
 
     private static bool TryParseTime(string raw, out DateTime time)

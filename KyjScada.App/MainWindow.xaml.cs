@@ -931,7 +931,6 @@ public partial class MainWindow : Window
         List<TrendSeries> Series, int TotalRaw, int TotalBuckets, double Interval);
 
     private int _trendGen;
-    private bool _trendBusy;
 
     /// <summary>
     /// 异步查询。大区间(7 天)同步查会把 UI 卡住几秒,所以放后台线程。
@@ -969,7 +968,6 @@ public partial class MainWindow : Window
         var gen = ++_trendGen;
         var sw = System.Diagnostics.Stopwatch.StartNew ();
 
-        _trendBusy = true;
         TrendStatsText.Text = "正在查询 " + selected.Count + " 条曲线……";
 
         var cts = new CancellationTokenSource ();
@@ -1037,7 +1035,6 @@ public partial class MainWindow : Window
         {
             if (gen == _trendGen)
             {
-                _trendBusy = false;
                 TrendCancelBtn.IsEnabled = false;
                 _trendCts = null;
             }
@@ -2708,37 +2705,64 @@ private void TickWritePage ()
     }
 }
 
+/// <summary>
+/// 统一开关命令闸门:两个页签(参数设置 / 点动)操作的是同一个 CommandGate,
+/// 勾选框和提示文字必须一起回填,否则一页改了另一页还显示旧状态。
+///
+/// 还要注意:WPF 里**代码给 IsChecked 赋值同样会触发 Checked/Unchecked**,
+/// 两个处理函数各自回填对方就会互相触发。所有回填集中在这里,用 _syncingGate 挡住。
+/// </summary>
+private void SetGateEnabled (bool enabled)
+{
+    if (_gate is null) return;
+
+    _gate.Enabled = enabled;
+
+    _syncingGate = true;
+
+    try
+    {
+        if (WriteEnableBox is not null) WriteEnableBox.IsChecked = enabled;
+        if (JogEnableBox is not null) JogEnableBox.IsChecked = enabled;
+    }
+    finally
+    {
+        _syncingGate = false;
+    }
+
+    if (WriteInfoText is not null)
+    {
+        WriteInfoText.Text = !enabled
+            ? "写入已关闭"
+            : _gate.Writer is null
+                ? "当前设备没有可用写入器(协议未采集或未连接)"
+                : "写入已启用,可写点 " + _writeRows.Count + " 个";
+    }
+
+    if (JogGateText is not null) JogGateText.Text = enabled ? "闸门已开" : "闸门已关";
+}
+
 private void OnWriteEnableChanged (object sender, RoutedEventArgs e)
 {
     if (_gate is null) return;
 
+    // 由 SetGateEnabled 回填勾选框引起的事件:状态已经同步过了,不要再走一遍
+    if (_syncingGate) return;
+
     var wantOn = WriteEnableBox.IsChecked == true;
 
     // 勾"允许写入"本身也要校验权限:没有 CanWrite 的人不能靠勾这个框拿写能力
-    if (wantOn)
+    if (wantOn && !(_currentUser is not null
+        && _currentUser.Has (KyjScada.Domain.Users.PermissionBit.CanWrite)))
     {
-        var canWrite = _currentUser is not null
-            && _currentUser.Has (KyjScada.Domain.Users.PermissionBit.CanWrite);
+        SetGateEnabled (false);
 
-        if (!canWrite)
-        {
-            WriteEnableBox.IsChecked = false;
+        if (WriteInfoText is not null) WriteInfoText.Text = "没有「参数设置」权限,请先用有权限的账号登录";
 
-            WriteInfoText.Text = "没有「参数设置」权限,请先用有权限的账号登录";
-            return;
-        }
+        return;
     }
 
-    _gate.Enabled = wantOn;
-
-    WriteInfoText.Text = _gate.Enabled
-        ? "写入已启用,可写点 " + _writeRows.Count + " 个"
-        : "写入已关闭";
-
-    if (_gate.Enabled && _gate.Writer is null)
-    {
-        WriteInfoText.Text = "当前设备没有可用写入器(协议未采集或未连接)";
-    }
+    SetGateEnabled (wantOn);
 }
 
 /// <summary>点某一行的「写入」。</summary>
@@ -3214,45 +3238,6 @@ private void TickAlarmPage ()
         return null;
     }
 
-    private static string FindSettings ()
-    {
-        var baseDir = AppContext.BaseDirectory;
-        var candidates = new[] { "settings", "Settings" };
-
-        foreach (var name in candidates)
-        {
-            var dir = Path.Combine (baseDir, name);
-
-            if (!Directory.Exists (dir)) continue;
-
-            // 现场可能只用 RTU/RTU-over-TCP:不能只认 ModbusTCP.json,
-            // 否则"配置导入/自检"会报找不到配置。取第一个真正有设备的文件。
-            foreach (var file in Directory.GetFiles (dir, "*.json"))
-            {
-                try
-                {
-                    var projects = SettingsJsonCodec.LoadFile (file);
-                    var project = SettingsJsonCodec.ActiveProject (projects);
-
-                    if (project is not null && project.AllDevices ().Any ()) return file;
-                }
-                catch
-                {
-                    // 坏文件跳过,继续找下一个
-                }
-            }
-
-            var any = Directory.GetFiles (dir, "*.json");
-
-            if (any.Length > 0) return any.OrderBy (f => f, StringComparer.OrdinalIgnoreCase).First ();
-        }
-
-        var direct = Path.Combine (baseDir, "settings.json");
-        if  (File.Exists (direct)) return direct;
-
-        return null;
-    }
-
     private void OnClosed (object sender, EventArgs e)
     {
         // 先停界面定时器,再停各设备流水线;采集服务由流水线负责释放
@@ -3260,8 +3245,10 @@ private void TickAlarmPage ()
 
         if (_uiTimer != null) _uiTimer.Stop ();
 
-        // MCP 要在通道释放前关:它可能还有在途请求要读写
-        McpHost.Stop ();
+        // MCP 要在通道释放前关:它可能还有在途请求要读写。
+        // 用后台停:写工具会 Dispatcher.Invoke 回界面线程,这里同步等 StopAsync
+        // 会和那条在途请求互相等待,关窗时偶发卡死。状态已同步清空,不会再有新写请求。
+        McpHost.StopInBackground ();
 
         _coordinator?.Dispose ();
         _coordinator = null;

@@ -4,6 +4,7 @@ public sealed class TestRunner
 {
     private int _pass;
     private int _fail;
+    private int _skip;
     private readonly List<string> _failures = new();
 
     public void Run(string name, Action body)
@@ -13,6 +14,12 @@ public sealed class TestRunner
             body();
             _pass++;
             Console.WriteLine("  [PASS] " + name);
+        }
+        catch (SkipTestException ex)
+        {
+            _skip++;
+            Console.WriteLine("  [SKIP] " + name);
+            Console.WriteLine("         " + ex.Message);
         }
         catch (Exception ex)
         {
@@ -26,7 +33,7 @@ public sealed class TestRunner
     public int Report()
     {
         Console.WriteLine();
-        Console.WriteLine("通过 " + _pass + " / 失败 " + _fail);
+        Console.WriteLine("通过 " + _pass + " / 失败 " + _fail + (_skip > 0 ? " / 跳过 " + _skip : ""));
 
         if (_fail > 0)
         {

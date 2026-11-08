@@ -1,6 +1,7 @@
 using System.Text;
 using KyjScada.Domain.History;
 using KyjScada.Infrastructure.Data;
+using KyjScada.Infrastructure.Tests;
 
 Console.OutputEncoding = Encoding.UTF8;
 
@@ -24,6 +25,7 @@ if (File.Exists(dbPath)) File.Delete(dbPath);
 
 var pass = 0;
 var fail = 0;
+var skip = 0;
 var failures = new List<string>();
 
 void Run(string name, Action body)
@@ -33,6 +35,13 @@ void Run(string name, Action body)
         body();
         pass++;
         Console.WriteLine("  [PASS] " + name);
+    }
+    catch (SkipTestException ex)
+    {
+        // 环境不满足:单独记 SKIP。原来这种用例直接 return,会被记成 PASS
+        skip++;
+        Console.WriteLine("  [SKIP] " + name);
+        Console.WriteLine("         " + ex.Message);
     }
     catch (Exception ex)
     {
@@ -307,10 +316,13 @@ KyjScada.Infrastructure.Tests.XlsxWriterTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.AtomicFileWriteTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.LegacyMigratorTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.CommandGateAuditTests.RunAll(Run);
         Run("界面行模型:129 个变量都能建行且初始为 --", () =>
         {
             var path = FindRealSettings ();
-            if  (path is null) return;
+
+            // 缺现场配置 = 这条用例没法跑,记 SKIP(不能冒充 PASS)
+            if  (path is null) throw new SkipTestException ("找不到现场配置 settings/ModbusTCP.json(用例依赖现场变量表)");
 
             var projects = KyjScada.Domain.Config.SettingsJsonCodec.LoadFile (path);
             var project = KyjScada.Domain.Config.SettingsJsonCodec.ActiveProject (projects);
@@ -334,7 +346,9 @@ KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
         Run("现场配置布局校验:129 个变量全部落在各自组内", () =>
         {
             var path = FindRealSettings ();
-            if  (path is null) return;
+
+            // 缺现场配置 = 这条用例没法跑,记 SKIP(不能冒充 PASS)
+            if  (path is null) throw new SkipTestException ("找不到现场配置 settings/ModbusTCP.json(用例依赖现场变量表)");
 
             var projects = KyjScada.Domain.Config.SettingsJsonCodec.LoadFile (path);
             var project = KyjScada.Domain.Config.SettingsJsonCodec.ActiveProject (projects);
@@ -352,7 +366,9 @@ KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
         Run("现场类型自检组:7 个变量按各自类型正确解析", () =>
         {
             var path = FindRealSettings ();
-            if  (path is null) return;
+
+            // 缺现场配置 = 这条用例没法跑,记 SKIP(不能冒充 PASS)
+            if  (path is null) throw new SkipTestException ("找不到现场配置 settings/ModbusTCP.json(用例依赖现场变量表)");
 
             var projects = KyjScada.Domain.Config.SettingsJsonCodec.LoadFile (path);
             var project = KyjScada.Domain.Config.SettingsJsonCodec.ActiveProject (projects);
@@ -367,30 +383,44 @@ KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
                 var ok = svc.CollectOnce (bus, DateTime.Now);
                 Console.WriteLine ("        成功采集 " + ok + " 个");
 
+                // 设备没连上就一个点都采不到:这条用例必须靠真设备,不能"跑完没异常就算通过"
+                if  (ok <= 0) throw new SkipTestException ("设备未连通,采集到 0 个点,类型自检跳过");
+
                 var snap = bus.GetSnapshot ();
                 var names = new[] { "bool", "short", "ushort", "int", "uint", "float", "double" };
+
+                var landed = 0;
 
                 foreach (var n in names)
                 {
                     var tv = snap[n];
 
-                    if  (tv is null)
-                    {
-                        Console.WriteLine ("        " + n + " = (不在总线)");
-                        continue;
-                    }
+                    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue (tv is not null, n + " 应出现在总线上(设备已连通,采集成功却少了点)");
 
-                    var d = tv.AsDouble ();
-                    Console.WriteLine ("        " + n.PadRight (8) + " = " + (d.HasValue ? d.Value.ToString ("F4") : "null")
+                    var d = tv!.AsDouble ();
+
+                    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue (d.HasValue, n + " 应能解析成数值,实际 " + (tv.Value?.GetType ().Name ?? "null"));
+                    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue (tv.Quality == KyjScada.Contracts.TagQuality.Good, n + " 采集质量应为 Good,实际 " + tv.Quality);
+
+                    // Bool 点位只能落在 0/1 —— 类型解析错位时这里会先炸
+                    if  (n == "bool") KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue (d!.Value == 0d || d.Value == 1d, "bool 点位应只取 0/1,实际 " + d.Value);
+
+                    landed++;
+
+                    Console.WriteLine ("        " + n.PadRight (8) + " = " + d!.Value.ToString ("F4")
                         + "  质量=" + tv.Quality);
                 }
+
+                KyjScada.Infrastructure.Tests.TestHelpers.AssertEq (names.Length, landed, "7 个类型点位都应采到");
             }
             finally { svc.Dispose (); }
         });
         Run("真实现场配置:129 变量可加载并分组", () =>
         {
             var path = FindRealSettings ();
-            if  (path is null) return;
+
+            // 缺现场配置 = 这条用例没法跑,记 SKIP(不能冒充 PASS)
+            if  (path is null) throw new SkipTestException ("找不到现场配置 settings/ModbusTCP.json(用例依赖现场变量表)");
 
             var projects = KyjScada.Domain.Config.SettingsJsonCodec.LoadFile (path);
             var project = KyjScada.Domain.Config.SettingsJsonCodec.ActiveProject (projects);
@@ -414,7 +444,8 @@ KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
 Run("界面行模型:现场在跑的 RTU-over-TCP 设备 139 个变量", () =>
 {
     var dir = FindRealSettingsDir();
-    if (dir is null) return;
+
+    if (dir is null) throw new SkipTestException("找不到现场配置目录 settings/(用例依赖现场变量表)");
 
     var loaded = KyjScada.Domain.Config.SettingsJsonCodec.LoadDirectory(dir);
 
@@ -434,7 +465,7 @@ Run("界面行模型:现场在跑的 RTU-over-TCP 设备 139 个变量", () =>
 });
 
 Console.WriteLine();
-Console.WriteLine("通过 " + pass + " / 失败 " + fail);
+Console.WriteLine("通过 " + pass + " / 失败 " + fail + (skip > 0 ? " / 跳过 " + skip : ""));
 
 if (fail > 0)
 {

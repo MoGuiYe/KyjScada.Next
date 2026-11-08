@@ -26,14 +26,19 @@ public static class TrendCsv
         foreach (var s in series)
         {
             sb.Append(',');
-            sb.Append(Escape(s.VarName));
+
+            // 先把"变量(单位)"拼成完整字段再转义。
+            // 原来分两段各自 Escape:变量名里只要有逗号,就会变成 "a,b"(mm) ——
+            // 引号提前收尾、单位落到引号外面,整行 CSV 的列数就错了,
+            // Excel 打开后从这一列起全部错位。
+            var label = s.VarName ?? "";
 
             if (!string.IsNullOrEmpty(s.Unit))
             {
-                sb.Append('(');
-                sb.Append(Escape(s.Unit));
-                sb.Append(')');
+                label += "(" + s.Unit + ")";
             }
+
+            sb.Append(Escape(label));
         }
 
         return sb.ToString();
@@ -141,7 +146,10 @@ public static class TrendCsv
 
         for (int i = stride; i < pts.Count && diffs.Count < n; i += stride)
         {
-            var d = (pts[i].Time - pts[i - stride].Time).TotalSeconds;
+            // 抽样是隔 stride 个点取一对,差值要除以 stride 才是相邻点的间隔。
+            // 不除的话容差 = 2 × 中位间隔 被放大 stride 倍,远点也会被当成"就近值"填进同一行,
+            // 导出的表里不同时刻的值被拉平到同一条时间线上。
+            var d = (pts[i].Time - pts[i - stride].Time).TotalSeconds / stride;
             if (d > 0) diffs.Add(d);
         }
 
@@ -152,10 +160,20 @@ public static class TrendCsv
         return diffs[diffs.Count / 2];
     }
 
-    /// <summary>CSV 字段转义:含逗号/引号/换行时用双引号包起来。</summary>
+    /// <summary>
+    /// CSV 字段转义:含逗号/引号/换行时用双引号包起来,并挡掉公式注入。
+    /// </summary>
     private static string Escape(string s)
     {
         if (string.IsNullOrEmpty(s)) return "";
+
+        // 公式注入:变量名/单位来自组态(可由界面编辑,也可能来自导入的配置),
+        // 以 = + - @ 开头时 Excel/WPS 会当公式执行,最坏能拉起 DDE/外部命令。
+        // 前面加单引号,Excel 按文本显示,后端的 CSV 解析也能原样读回。
+        if (s[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
+        {
+            s = "'" + s;
+        }
 
         if (s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) < 0) return s;
 

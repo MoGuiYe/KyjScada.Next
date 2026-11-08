@@ -79,8 +79,30 @@ public sealed class SiemensDescriptor : IProtocolDescriptor
                 return string.Empty;
             }
 
-            var dbPart = groupStart.Substring(0, groupStart.IndexOf('.'));
-            return dbPart + "." + varOffset.Trim();
+            var dot = groupStart.IndexOf('.');
+            var dbPart = groupStart.Substring(0, dot);
+
+            // 点号后面是该组的**基准偏移**,必须与组内偏移相加。
+            // 原来直接丢弃:组起始 "DB1.100" + 偏移 10 会导成 "DB1.10",
+            // 整组点位全部指到 DB 开头,读回来的是别的变量的值(还都不报错)。
+            var baseText = groupStart.Substring(dot + 1).Trim();
+
+            if (!int.TryParse(baseText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var baseOffset))
+            {
+                return string.Empty;
+            }
+
+            if (!int.TryParse(varOffset.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var offset))
+            {
+                return string.Empty;
+            }
+
+            if (baseOffset < 0 || offset < 0)
+            {
+                return string.Empty;
+            }
+
+            return dbPart + "." + (baseOffset + offset).ToString(CultureInfo.InvariantCulture);
         }
 
         // 非 DB 区:区域前缀 + 基准 + 偏移

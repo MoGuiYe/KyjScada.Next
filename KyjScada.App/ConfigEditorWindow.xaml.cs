@@ -47,6 +47,22 @@ public partial class ConfigEditorWindow : Window
 
         InitFileList();
         Load();
+
+        // 右上角 X 直接关窗口时也要拦一下。
+        // 内嵌的属性面板是"边打字边写进对象"的,关掉窗口不会自动落盘;
+        // 原来只有"切换文件"有确认,于是调完一整屏阈值、顺手点 X,
+        // 改的东西全没了而且没有任何提示。
+        Closing += OnClosing;
+    }
+
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (!_dirty) return;
+
+        var r = MessageBox.Show (this, "有未保存的修改,关闭后会丢失。仍要关闭?",
+            "确认", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+        if (r != MessageBoxResult.Yes) e.Cancel = true;
     }
 
     /// <summary>
@@ -456,10 +472,14 @@ public partial class ConfigEditorWindow : Window
         // 用 InvariantCulture:配置里的小数点是句点,换机器不会变成逗号
         box.TextChanged += (_, _) =>
         {
-            if (float.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var f))
-            {
-                setter(f);
-            }
+            if (!float.TryParse (box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) return;
+
+            // "NaN"/"Infinity" 也是 float.TryParse 能认的合法输入。
+            // 放进去以后,报警比较恒为 false、Scale 乘出来全是 NaN,
+            // 归档库里会写进一堆洗不掉的脏值 —— 这里直接不接受。
+            if (float.IsNaN (f) || float.IsInfinity (f)) return;
+
+            setter (f);
         };
 
         row.Children.Add(box);
@@ -971,11 +991,11 @@ private void OnImportVars(object sender, RoutedEventArgs e)
 
     if (dlg.ShowDialog() != true) return;
 
-    string[] lines;
+    List<List<string>> records;
 
     try
     {
-        lines = File.ReadAllLines(dlg.FileName, System.Text.Encoding.UTF8);
+        records = SplitCsvRecords (File.ReadAllText (dlg.FileName, System.Text.Encoding.UTF8));
     }
     catch (Exception ex)
     {
@@ -983,25 +1003,25 @@ private void OnImportVars(object sender, RoutedEventArgs e)
         return;
     }
 
-    if (lines.Length == 0)
+    if (records.Count == 0)
     {
         ProblemText.Text = "文件是空的";
         return;
     }
 
-    var start = lines[0].StartsWith("设备", StringComparison.Ordinal) ? 1 : 0; // 有表头就跳过
+    var start = records[0].Count > 0 && records[0][0].StartsWith ("设备", StringComparison.Ordinal)
+        ? 1
+        : 0; // 有表头就跳过
 
     var added = 0;
     var updated = 0;
     var skipped = 0;
 
-    for (var i = start; i < lines.Length; i++)
+    for (var i = start; i < records.Count; i++)
     {
-        var line = lines[i];
+        var f = records[i];
 
-        if (string.IsNullOrWhiteSpace(line)) continue;
-
-        var f = SplitCsv(line);
+        if (f.Count == 0 || f.All (x => string.IsNullOrWhiteSpace (x))) continue;
 
         if (f.Count < 6)
         {
@@ -1050,14 +1070,16 @@ private void OnImportVars(object sender, RoutedEventArgs e)
         v.Start = f[5].Trim().Length > 0 ? f[5].Trim() : v.Start;
         v.VarAddress = v.Start;
         if (f.Count > 6 && f[6].Trim().Length > 0) v.Unit = f[6].Trim();
-        if (f.Count > 7 && float.TryParse(f[7], NumberStyles.Float, CultureInfo.InvariantCulture, out var sc)) v.Scale = sc == 0 ? 1f : sc;
-        if (f.Count > 8 && float.TryParse(f[8], NumberStyles.Float, CultureInfo.InvariantCulture, out var off)) v.Offset = off;
+        // 数值列统一走 ParseFinite:CSV 是手工改的,"NaN"/"Infinity"/"1e400" 都可能出现,
+        // 直接灌进配置会让 Scale/阈值/死区变成非有限值,后面所有比较与归档全部失效。
+        if (f.Count > 7 && ParseFinite (f[7], out var sc)) v.Scale = sc == 0 ? 1f : sc;
+        if (f.Count > 8 && ParseFinite (f[8], out var off)) v.Offset = off;
         if (f.Count > 9) v.ArchiveEnable = f[9].Trim() is "是" or "1" or "true" or "True";
-        if (f.Count > 10 && float.TryParse(f[10], NumberStyles.Float, CultureInfo.InvariantCulture, out var hi)) v.HighAlarmValue = hi;
+        if (f.Count > 10 && ParseFinite (f[10], out var hi)) v.HighAlarmValue = hi;
         if (f.Count > 11) v.HighAlarmEnable = f[11].Trim() is "是" or "1" or "true" or "True";
-        if (f.Count > 12 && float.TryParse(f[12], NumberStyles.Float, CultureInfo.InvariantCulture, out var lo)) v.LowAlarmValue = lo;
+        if (f.Count > 12 && ParseFinite (f[12], out var lo)) v.LowAlarmValue = lo;
         if (f.Count > 13) v.LowAlarmEnable = f[13].Trim() is "是" or "1" or "true" or "True";
-        if (f.Count > 14 && float.TryParse(f[14], NumberStyles.Float, CultureInfo.InvariantCulture, out var db)) v.AlarmDeadband = db;
+        if (f.Count > 14 && ParseFinite (f[14], out var db)) v.AlarmDeadband = db;
         if (f.Count > 15 && f[15].Trim().Length > 0) v.Comments = f[15].Trim();
     }
 
@@ -1069,34 +1091,95 @@ private void OnImportVars(object sender, RoutedEventArgs e)
         + "。变量总地址请用「校验」按钮核对";
 }
 
-/// <summary>极简 CSV 拆行:支持双引号包裹与 "" 转义。</summary>
+/// <summary>
+/// CSV 数值解析:只接受**有限**浮点。
+/// float.TryParse 会把 "NaN"/"Infinity" 当成合法值,"1e400" 也会溢出成 Infinity,
+/// 这些值一旦进了配置,缩放、报警比较、归档写入全部失效而且看不出来。
+/// </summary>
+private static bool ParseFinite(string text, out float value)
+{
+    value = 0f;
+
+    if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) return false;
+
+    if (float.IsNaN(f) || float.IsInfinity(f)) return false;
+
+    value = f;
+
+    return true;
+}
+
+/// <summary>极简 CSV 拆行:支持双引号包裹与 "" 转义(单行版本,保留给老调用)。</summary>
 private static List<string> SplitCsv(string line)
 {
-    var result = new List<string>();
+    var records = SplitCsvRecords(line);
+
+    return records.Count > 0 ? records[0] : new List<string>();
+}
+
+/// <summary>
+/// 把整个 CSV 文本拆成「记录 → 字段」两层。必须整文解析,不能一行一条:
+/// 引号里的备注可以带换行(Excel 里 Alt+Enter 就能敲出来),导出时也是原样引起来的。
+/// 原来用 File.ReadAllLines + 逐行 SplitCsv:一条带换行的备注会被拆成两条,
+/// 后半截被当成新变量行解析,于是导入后凭空多出一批地址离谱的变量,
+/// 而界面上只报"新增 N 个"。
+/// </summary>
+private static List<List<string>> SplitCsvRecords(string text)
+{
+    var records = new List<List<string>>();
+    var fields = new List<string>();
     var sb = new System.Text.StringBuilder();
     var quoted = false;
 
-    for (var i = 0; i < line.Length; i++)
+    for (var i = 0; i < text.Length; i++)
     {
-        var c = line[i];
+        var c = text[i];
 
         if (quoted)
         {
             if (c == '"')
             {
-                if (i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; }
+                if (i + 1 < text.Length && text[i + 1] == '"') { sb.Append('"'); i++; }
                 else quoted = false;
+            }
+            else if (c == '\r' && i + 1 < text.Length && text[i + 1] == '\n')
+            {
+                // 引号内的换行是**数据**,原样保留(统一成 \n,避免导出/导入来回变形)
+                sb.Append('\n');
+                i++;
             }
             else sb.Append(c);
         }
         else if (c == '"') quoted = true;
-        else if (c == ',') { result.Add(sb.ToString()); sb.Clear(); }
+        else if (c == ',') { fields.Add(sb.ToString()); sb.Clear(); }
+        else if (c == '\r')
+        {
+            // 行尾(CRLF 或单个 CR):收一条记录
+            fields.Add(sb.ToString());
+            sb.Clear();
+            records.Add(fields);
+            fields = new List<string>();
+
+            if (i + 1 < text.Length && text[i + 1] == '\n') i++;
+        }
+        else if (c == '\n')
+        {
+            fields.Add(sb.ToString());
+            sb.Clear();
+            records.Add(fields);
+            fields = new List<string>();
+        }
         else sb.Append(c);
     }
 
-    result.Add(sb.ToString());
+    // 收尾:最后一行可能没有换行符
+    if (sb.Length > 0 || fields.Count > 0)
+    {
+        fields.Add(sb.ToString());
+        records.Add(fields);
+    }
 
-    return result;
+    return records;
 }
 
 // ==================== 保存 / 校验 ====================

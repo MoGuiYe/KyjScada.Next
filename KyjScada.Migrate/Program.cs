@@ -36,7 +36,13 @@ public static class Program
             return 2;
         }
 
-        if (Path.GetFullPath(from) == Path.GetFullPath(to))
+        // 路径比较必须忽略大小写:Windows 上 "D:\Data\history.db" 与
+        // "d:\data\HISTORY.db" 是同一个文件,用 == (序数比较)会判成不同文件,
+        // 于是迁移程序往老库自己身上写 —— 老库当场被改,而且改之前没人备份。
+        var fromFull = Path.GetFullPath(from);
+        var toFull = Path.GetFullPath(to);
+
+        if (string.Equals(fromFull, toFull, StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine("源库和目标库是同一个文件,拒绝执行(会污染老库)。");
 

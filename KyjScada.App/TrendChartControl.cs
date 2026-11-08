@@ -988,7 +988,11 @@ public sealed class TrendChartControl : FrameworkElement
         var offset = (_viewStart - _viewStart.Date).TotalSeconds;
         var firstTick = Math.Ceiling(offset / timeStep) * timeStep;
 
-        for (var sec = firstTick; sec <= total; sec += timeStep)
+        // 循环上界必须是"起点在当天的偏移 + 视图长度"。
+        // sec 是绝对秒数(相对当天 0 点),写成 sec <= total 时:
+        // 视图起点只要不是 0 点(offset > 0),firstTick 就已经大于 total,
+        // 循环体一次都不执行 —— 白天看趋势就没有时间刻度,只有午夜刚过才偶然正常。
+        for (var sec = firstTick; sec <= offset + total; sec += timeStep)
         {
             var t = _viewStart.Date.AddSeconds(sec);
             if (t < _viewStart) continue;
@@ -1234,7 +1238,8 @@ public sealed class TrendChartControl : FrameworkElement
         var offset = (origin - origin.Date).TotalSeconds;
         var firstTick = Math.Ceiling(offset / timeStep) * timeStep;
 
-        for (var sec = firstTick; sec <= total; sec += timeStep)
+        // 同上:sec 相对当天 0 点,上界要加上 offset,否则非 0 点起点的视图一个刻度都不画。
+        for (var sec = firstTick; sec <= offset + total; sec += timeStep)
         {
             var t = origin.Date.AddSeconds(sec);
             if (t < _viewStart) continue;

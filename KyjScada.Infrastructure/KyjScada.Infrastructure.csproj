@@ -10,6 +10,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 导出落盘的兜底分支(改名替换)只有靠内部入口才能稳定测到,见 AtomicFileWrite.ReplaceViaRename。 -->
+    <InternalsVisibleTo Include="KyjScada.Infrastructure.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
     <!-- 串口(ModbusRTU)需要。.NET 8 起不在框架内,单独引包。 -->
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />

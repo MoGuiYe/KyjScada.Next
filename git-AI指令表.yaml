@@ -15,7 +15,7 @@ meta:
   platform: WorkBuddy
   version: 2
   created: "2026-10-23"
-  updated: "2026-11-06"
+  updated: "2026-11-07"
   scope: "项目内根目录（不要放进全局配置）"
   how_to_use: "按 commands[].prompts 匹配用户的话，执行 commands[].command；同时遵守 platform 节"
   placeholders:
@@ -77,6 +77,7 @@ defaults:
     - "永不 git add -f 含明文密码/密钥的配置文件（如 ScreenBlanker.ini）"
     - "永不提交 dist/、build/、node_modules/ 与 *.exe 等打包产物（.gitignore 已排除）"
     - "提交前先 git status --short 扫一遍：产物、大文件（>10MB）、敏感配置命中就拦下"
+    - "忽略规则禁用无前导斜杠的裸目录名（如 data/）：Windows 大小写不敏感会连 Data/ 等源码目录一起吞掉，导致 clone 出来的仓库缺文件、无法编译；提交前反向扫 git ls-files --others --ignored --exclude-standard 里的源码，必要时用 git archive HEAD 或临时 clone 构建验证完整性"
     - "不猜命令 id、不连发命令；命令被拒绝后不换工具或等价命令重试"
     - "一次一个操作，跑完核对输出再决定下一步"
 
@@ -486,6 +487,13 @@ commands:
     command: "git check-ignore -v <file>"
     risk: safe
 
+  - group: "忽略规则（.gitignore）"
+    intent: "排查忽略规则误吞源码目录（clone 后编译不过 / 仓库不完整）"
+    prompts: ["clone 下来编译不过，是不是漏了文件", "检查 .gitignore 有没有吞掉源码目录", "为什么 Data 目录没进仓库", "仓库是不是缺文件"]
+    command: "git ls-files --others --ignored --exclude-standard | grep -Ei '[.](cs|py|ts|java|go|rs)$' 找被忽略的源码；git check-ignore -v <file> 定位命中行；把裸目录名改成带前导斜杠或精确到 bin/ 路径，再 git add 漏掉的文件 && git commit -m \"<信息>\"；最后用 git archive --format=tar HEAD | tar -tf - 或临时 clone 构建验证"
+    risk: safe
+    note: "真实事故：.gitignore 写 data/（无前导斜杠），Windows 大小写不敏感吞掉 Infrastructure/Data/ 与 Mcp/Data/ 共 6 个 .cs，11 个已跟踪文件依赖这两个命名空间；本地能编译、clone 出来必缺类。按平台约定新建提交补回，不改写历史；旧提交仍缺文件要如实告知"
+
   # ---------- 8. 远程仓库 ----------
   - group: "远程仓库"
     intent: "关联远程仓库"
@@ -601,8 +609,15 @@ commands:
   - group: "WorkBuddy 场景专项"
     intent: "提交前排雷与大文件预警"
     prompts: ["提交前检查有没有不该进库的文件", "这次提交会不会带大文件"]
-    command: "先 git status --short，扫 node_modules/ dist/ build/ *.exe *.asar *.rar *.zip 与敏感配置；超 10MB 先提醒"
+    command: "先 git status --short 扫 node_modules/ dist/ build/ *.exe *.asar *.rar *.zip 与敏感配置，超 10MB 先提醒；再反向扫 git ls-files --others --ignored --exclude-standard 里有没有被 .gitignore 误吞的源码文件（漏文件比多提交更致命）"
     risk: safe
+
+  - group: "WorkBuddy 场景专项"
+    intent: "校验仓库内容完整（clone 后能独立编译）"
+    prompts: ["这个仓库 clone 下来能编译吗", "检查仓库是不是缺文件", "验证一下仓库完整性"]
+    command: "git archive --format=tar HEAD | tar -tf - 核对关键源码是否在库；更严格则 clone 到临时目录后跑项目构建命令，确认 0 错误；临时目录清理若被安全策略拒绝，停止重试并告知用户路径"
+    risk: safe
+    note: "git grep 查得到引用不等于定义在库里：本地磁盘有文件、仓库没有，是最容易漏的一类坏仓库"
 
   - group: "WorkBuddy 场景专项"
     intent: "保护平台自身目录"

@@ -4,7 +4,12 @@ using KyjScada.Domain.Tests;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-var settingsDir = @"D:\DeepSeekHarness\KYJScadaProWpf\KYJScadaProWpf\bin\Debug\settings";
+// 现场配置文件的位置**不能写死绝对路径**。原来这里钉的是
+// @"D:\DeepSeekHarness\KYJScadaProWpf\...\settings" —— 换台机器、换个用户名、
+// 或者只是把仓库挪个目录,整套用例就全红,而且红的原因跟被测代码毫无关系。
+// 现在按"环境变量 → 本仓库 App 的 settings → 测试目录 _work → 老仓库"依次探测。
+var settingsDir = FindSettingsDir ();
+
 var workDir = Path.Combine(AppContext.BaseDirectory, "_work");
 Directory.CreateDirectory(workDir);
 
@@ -12,13 +17,14 @@ var t = new TestRunner();
 
 t.Run("文件存在", () =>
 {
-    var p = Path.Combine(settingsDir, "ModbusTCP.json");
+    var p = SettingsFile ("ModbusTCP.json");
     Assert.True(File.Exists(p), "找不到 " + p);
+    Assert.True(new FileInfo(p).Length > 0, "配置文件是空文件: " + p);
 });
 
 t.Run("解析 ModbusTCP 项目", () =>
 {
-    var projects = SettingsJsonCodec.LoadFile(Path.Combine(settingsDir, "ModbusTCP.json"));
+    var projects = SettingsJsonCodec.LoadFile(SettingsFile ("ModbusTCP.json"));
     var project = SettingsJsonCodec.ActiveProject(projects);
 
     Assert.True(project is not null, "应能找到有效项目");
@@ -37,7 +43,7 @@ t.Run("解析 ModbusTCP 项目", () =>
 
 t.Run("设备参数进 Options 而非 Comments", () =>
 {
-    var projects = SettingsJsonCodec.LoadFile(Path.Combine(settingsDir, "ModbusTCP.json"));
+    var projects = SettingsJsonCodec.LoadFile(SettingsFile ("ModbusTCP.json"));
     var dev = SettingsJsonCodec.ActiveProject(projects)!.GetDevices("ModbusTCP")[0];
 
     Assert.True(dev.Options.ContainsKey("IsShortAddress"), "Options 应有 IsShortAddress");
@@ -49,7 +55,7 @@ t.Run("设备参数进 Options 而非 Comments", () =>
 
 t.Run("变量字段完整", () =>
 {
-    var projects = SettingsJsonCodec.LoadFile(Path.Combine(settingsDir, "ModbusTCP.json"));
+    var projects = SettingsJsonCodec.LoadFile(SettingsFile ("ModbusTCP.json"));
     var v = SettingsJsonCodec.ActiveProject(projects)!.GetDevices("ModbusTCP")[0].GroupList[0].VarList[0];
 
     Assert.Equal("LQT_Level", v.VarName, "变量名");
@@ -77,7 +83,7 @@ t.Run("Scale 为 0 时修正为 1", () =>
 
 t.Run("串口设备解析", () =>
 {
-    var projects = SettingsJsonCodec.LoadFile(Path.Combine(settingsDir, "ModbusRTU.json"));
+    var projects = SettingsJsonCodec.LoadFile(SettingsFile ("ModbusRTU.json"));
     var rtu = SettingsJsonCodec.ActiveProject(projects)!.GetDevices("ModbusRTU");
 
     Assert.Equal(1, rtu.Count, "RTU 设备数");
@@ -91,7 +97,7 @@ t.Run("串口设备解析", () =>
 
 t.Run("往返幂等", () =>
 {
-    var path = Path.Combine(settingsDir, "ModbusTCP.json");
+    var path = SettingsFile ("ModbusTCP.json");
 
     var original = SettingsJsonCodec.LoadFile(path);
     var json1 = SettingsJsonCodec.ToJson(original);
@@ -121,7 +127,7 @@ t.Run("往返幂等", () =>
 
 t.Run("往返 ModbusRTU 全字段", () =>
 {
-    var path = Path.Combine(settingsDir, "ModbusRTU.json");
+    var path = SettingsFile ("ModbusRTU.json");
 
     var original = SettingsJsonCodec.LoadFile(path);
     var again = SettingsJsonCodec.Parse(SettingsJsonCodec.ToJson(original));
@@ -148,7 +154,7 @@ t.Run("往返 ModbusRTU 全字段", () =>
 
 t.Run("原子写不损坏原文件", () =>
 {
-    var src = Path.Combine(settingsDir, "ModbusTCP.json");
+    var src = SettingsFile ("ModbusTCP.json");
     var dst = Path.Combine(workDir, "ModbusTCP.json");
 
     File.Copy(src, dst, true);
@@ -183,7 +189,7 @@ t.Run("3 个现场文件都能解析出有效项目", () =>
 {
     foreach (var name in new[] { "ModbusTCP.json", "ModbusRTU.json", "ModbusRTUOverTCP.json" })
     {
-        var p = Path.Combine(settingsDir, name);
+        var p = SettingsFile (name);
         Assert.True(File.Exists(p), "缺少 " + name);
 
         var projects = SettingsJsonCodec.LoadFile(p);
@@ -203,7 +209,7 @@ t.Run("3 个文件往返后变量数一致", () =>
 {
     foreach (var name in new[] { "ModbusTCP.json", "ModbusRTU.json", "ModbusRTUOverTCP.json" })
     {
-        var p = Path.Combine(settingsDir, name);
+        var p = SettingsFile (name);
 
         var original = SettingsJsonCodec.LoadFile(p);
         var json = SettingsJsonCodec.ToJson(original);
@@ -220,3 +226,58 @@ ProtocolTests.RunAll(t);
 AlarmTests.RunAll(t);
 
 return t.Report();
+
+/// <summary>
+/// 找现场配置目录。探测顺序:环境变量 KYJ_SETTINGS_DIR → 本仓库 App 的
+/// bin\...\settings → 测试输出目录的 _work → 老系统仓库。都找不到返回 null,
+/// 由 SettingsFile 抛 SkipTestException(记 SKIP,不冒充 PASS)。
+/// </summary>
+string? FindSettingsDir()
+{
+    var fromEnv = Environment.GetEnvironmentVariable("KYJ_SETTINGS_DIR");
+
+    if (!string.IsNullOrWhiteSpace(fromEnv) && Directory.Exists(fromEnv)) return fromEnv;
+
+    var baseDir = AppContext.BaseDirectory;
+
+    var candidates = new List<string>
+    {
+        // 本仓库:从 <repo>\KyjScada.Domain.Tests\bin\Debug\net8.0 往上找 App 的输出目录
+        Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..",
+            "KyjScada.App", "bin", "Debug", "net8.0-windows", "settings")),
+
+        // 用例自己搬过来的副本
+        Path.Combine(baseDir, "_work")
+    };
+
+    foreach (var dir in candidates)
+    {
+        if (Directory.Exists(dir) && File.Exists(Path.Combine(dir, "ModbusTCP.json"))) return dir;
+    }
+
+    // 最后才退回老仓库(只在开发机上存在,不再当唯一路径)
+    const string legacy = @"D:\DeepSeekHarness\KYJScadaProWpf\KYJScadaProWpf\bin\Debug\settings";
+
+    if (Directory.Exists(legacy) && File.Exists(Path.Combine(legacy, "ModbusTCP.json"))) return legacy;
+
+    return null;
+}
+
+/// <summary>
+/// 取一个现场配置文件的完整路径。
+/// 连目录都没有 = 环境不具备 → SKIP;目录有、文件缺 = 仓库缺东西 → 真失败。
+/// </summary>
+string SettingsFile(string name)
+{
+    if (settingsDir is null)
+    {
+        throw new SkipTestException(
+            "找不到现场配置目录(可用环境变量 KYJ_SETTINGS_DIR 指定)。这套用例依赖现场变量表,不伪造数据。");
+    }
+
+    var path = Path.Combine(settingsDir, name);
+
+    if (!File.Exists(path)) throw new Exception("配置目录 " + settingsDir + " 里缺少 " + name);
+
+    return path;
+}

@@ -111,25 +111,49 @@ public partial class MainWindow
         ApplyJogPermissions();
     }
 
+    /// <summary>
+    /// 有命令正在下发(急停/点动/强制写)。这几个动作都是"确认 → 后台 await → 回填结果",
+    /// 中间界面完全可点:连点两次会同时下发两批写命令,还会互相覆盖结果文字。
+    /// </summary>
+    private bool _jogBusy;
+
+    /// <summary>
+    /// 正在用代码回填 JogEnableBox.IsChecked。WPF 里**代码赋值也会触发 Checked/Unchecked**,
+    /// 不挡住的话每次刷新权限都会走一遍 OnJogEnableChanged,
+    /// 把"上一条命令的结果"覆盖成"写入已启用",还会连带改参数设置页的勾选框。
+    /// </summary>
+    private bool _syncingGate;
+
     /// <summary>按权限开/关本页控件(界面禁用只是提示,事件里还会再校验一次)。</summary>
     private void ApplyJogPermissions()
     {
         var hasJog = HasPermission(PermissionBit.CanJog);
         var hasForce = HasPermission(PermissionBit.CanForce);
         var hasAny = _jogRows.Count > 0;
+        var idle = !_jogBusy;
 
-        if (EstopBtn is not null) EstopBtn.IsEnabled = hasJog && _jogRows.Any(r => r.IsBool);
-        if (JogOnBtn is not null) JogOnBtn.IsEnabled = hasJog && hasAny;
-        if (JogOffBtn is not null) JogOffBtn.IsEnabled = hasJog && hasAny;
-        if (ForceWriteBtn is not null) ForceWriteBtn.IsEnabled = hasForce && hasAny;
-        if (ForceValueBox is not null) ForceValueBox.IsEnabled = hasForce && hasAny;
-        if (JogVarBox is not null) JogVarBox.IsEnabled = hasAny;
+        if (EstopBtn is not null) EstopBtn.IsEnabled = hasJog && idle && _jogRows.Any(r => r.IsBool);
+        if (JogOnBtn is not null) JogOnBtn.IsEnabled = hasJog && idle && hasAny;
+        if (JogOffBtn is not null) JogOffBtn.IsEnabled = hasJog && idle && hasAny;
+        if (ForceWriteBtn is not null) ForceWriteBtn.IsEnabled = hasForce && idle && hasAny;
+        if (ForceValueBox is not null) ForceValueBox.IsEnabled = hasForce && idle && hasAny;
+        if (JogVarBox is not null) JogVarBox.IsEnabled = hasAny && idle;
 
         // 与「参数设置」页共用同一个命令闸门,这里只显示/切换它的状态
         if (JogEnableBox is not null)
         {
-            JogEnableBox.IsEnabled = hasJog;
-            JogEnableBox.IsChecked = _gate?.Enabled == true;
+            JogEnableBox.IsEnabled = hasJog && idle;
+
+            _syncingGate = true;
+
+            try
+            {
+                JogEnableBox.IsChecked = _gate?.Enabled == true;
+            }
+            finally
+            {
+                _syncingGate = false;
+            }
         }
 
         if (JogGateText is not null)
@@ -143,27 +167,38 @@ public partial class MainWindow
     {
         if (_gate is null) return;
 
+        // 程序回填勾选状态时不要把用户/上一次命令的结果刷掉
+        if (_syncingGate) return;
+
+        if (_jogBusy)
+        {
+            JogResultText.Text = "✘ 命令正在下发,稍后再切换闸门";
+            ApplyJogPermissions();
+            return;
+        }
+
         var wantOn = JogEnableBox.IsChecked == true;
 
         if (wantOn && !HasPermission(PermissionBit.CanJog))
         {
-            JogEnableBox.IsChecked = false;
+            _syncingGate = true;
+
+            try
+            {
+                JogEnableBox.IsChecked = false;
+            }
+            finally
+            {
+                _syncingGate = false;
+            }
 
             JogResultText.Text = "✘ 没有「点动」权限,不能开启下发";
             return;
         }
 
-        _gate.Enabled = wantOn;
+        // 闸门只有一个:两页的勾选框、两处提示文字都在 SetGateEnabled 里统一回填
+        SetGateEnabled (wantOn);
 
-        // 参数设置页的勾选框是同一个闸门,顺手同步,避免两页显示相反状态
-        if (WriteEnableBox is not null) WriteEnableBox.IsChecked = wantOn;
-
-        if (WriteInfoText is not null)
-        {
-            WriteInfoText.Text = wantOn ? "写入已启用" : "写入已关闭(闸门由急停/点动页关闭)";
-        }
-
-        JogGateText.Text = wantOn ? "闸门已开" : "闸门已关";
         JogResultText.Text = wantOn
             ? "写入已启用。命令会经串行化/限速后下发。"
             : "写入已关闭,急停/点动/强制都不会下发。";
@@ -187,6 +222,12 @@ public partial class MainWindow
         if (_gate is null)
         {
             JogResultText.Text = "✘ 命令闸门未初始化";
+            return;
+        }
+
+        if (_jogBusy)
+        {
+            JogResultText.Text = "✘ 上一条命令还在下发,请稍候";
             return;
         }
 
@@ -221,23 +262,39 @@ public partial class MainWindow
         var gate = _gate;
         var names = targets.Select(t => t.VarName).ToList();
 
-        var (ok, fail) = await Task.Run(() =>
+        _jogBusy = true;
+        ApplyJogPermissions ();
+
+        try
         {
-            var good = 0;
-            var bad = new List<string>();
-
-            foreach (var name in names)
+            var (ok, fail) = await Task.Run(() =>
             {
-                var r = gate.Write(name, EStopValue, "estop");
-                if (r.Success) good++;
-                else bad.Add(name + ": " + r.Message);
-            }
+                var good = 0;
+                var bad = new List<string>();
 
-            return (good, bad);
-        }).ConfigureAwait(true);
+                foreach (var name in names)
+                {
+                    var r = gate.Write(name, EStopValue, "estop");
+                    if (r.Success) good++;
+                    else bad.Add(name + ": " + r.Message);
+                }
 
-        JogResultText.Text = "■ 急停已执行:成功 " + ok + "/" + names.Count
-            + (fail.Count > 0 ? "\n失败: " + string.Join("; ", fail.Take(3)) : "");
+                return (good, bad);
+            }).ConfigureAwait(true);
+
+            JogResultText.Text = "■ 急停已执行:成功 " + ok + "/" + names.Count
+                + (fail.Count > 0 ? "\n失败: " + string.Join("; ", fail.Take(3)) : "");
+        }
+        catch (Exception ex)
+        {
+            // async void 里没有 catch 会直接终止进程,按钮也会永久停在 disabled
+            JogResultText.Text = "■ 急停执行异常: " + ex.Message;
+        }
+        finally
+        {
+            _jogBusy = false;
+            ApplyJogPermissions ();
+        }
     }
 
     /// <summary>点动开:选中 Bool 点写 1。</summary>
@@ -256,6 +313,12 @@ public partial class MainWindow
     private async void JogPoint(double value, string action)
     {
         if (_gate is null) return;
+
+        if (_jogBusy)
+        {
+            JogResultText.Text = "✘ 上一条命令还在下发,请稍候";
+            return;
+        }
 
         if (!HasPermission(PermissionBit.CanJog))
         {
@@ -282,26 +345,36 @@ public partial class MainWindow
         var gate = _gate;
         var name = row.VarName;
 
-        WriteOutcome r;
+        _jogBusy = true;
+        ApplyJogPermissions ();
 
         try
         {
-            r = await Task.Run(() => gate.Write(name, value, "jog")).ConfigureAwait(true);
+            var r = await Task.Run(() => gate.Write(name, value, "jog")).ConfigureAwait(true);
+
+            JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " " + action + ": " + r.Message;
         }
         catch (Exception ex)
         {
             JogResultText.Text = "✘ " + name + " 点动异常: " + ex.Message;
-
-            return;
         }
-
-        JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " " + action + ": " + r.Message;
+        finally
+        {
+            _jogBusy = false;
+            ApplyJogPermissions ();
+        }
     }
 
     /// <summary>强制写:CanForce + 确认弹窗。目标 = 选中变量,任何数值类型都可用。</summary>
     private async void OnForceWrite(object sender, RoutedEventArgs e)
     {
         if (_gate is null) return;
+
+        if (_jogBusy)
+        {
+            JogResultText.Text = "✘ 上一条命令还在下发,请稍候";
+            return;
+        }
 
         if (!HasPermission(PermissionBit.CanForce))
         {
@@ -334,20 +407,24 @@ public partial class MainWindow
         var gate = _gate;
         var name = row.VarName;
 
-        WriteOutcome r;
+        _jogBusy = true;
+        ApplyJogPermissions ();
 
         try
         {
-            r = await Task.Run(() => gate.Write(name, value, "force")).ConfigureAwait(true);
+            var r = await Task.Run(() => gate.Write(name, value, "force")).ConfigureAwait(true);
+
+            JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " 强制: " + r.Message;
         }
         catch (Exception ex)
         {
             JogResultText.Text = "✘ " + name + " 强制写异常: " + ex.Message;
-
-            return;
         }
-
-        JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " 强制: " + r.Message;
+        finally
+        {
+            _jogBusy = false;
+            ApplyJogPermissions ();
+        }
     }
 
     /// <summary>刷新当前值(页签可见时)。</summary>

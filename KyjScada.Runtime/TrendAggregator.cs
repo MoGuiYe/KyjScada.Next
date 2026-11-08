@@ -197,8 +197,16 @@ public static class TrendAggregator
 
         var bucketCount = (int)Math.Ceiling(span / intervalSeconds);
 
-        // 防御:桶数上限,防止有人把间隔设成 0.1 秒时爆内存
-        if (bucketCount > MaxRawPoints) bucketCount = MaxRawPoints;
+        // 防御:桶数上限,防止有人把间隔设成 0.1 秒时爆内存。
+        // 但**不能只砍桶数**:砍了桶数却不放大间隔,超上限的点全被下面 idx>=bucketCount
+        // 的钳位塞进最后一桶 —— 长区间会挤出一个包含几万点的巨型桶,
+        // 图上看起来就是"最后一根柱子异常粗、前面全空"。
+        // 放大间隔后,bucketCount 个桶仍然均匀覆盖整个区间,只是分辨率变粗。
+        if (bucketCount > MaxRawPoints)
+        {
+            bucketCount = MaxRawPoints;
+            intervalSeconds = span / bucketCount;
+        }
 
         // 每桶累积器
         var first = new double[bucketCount];

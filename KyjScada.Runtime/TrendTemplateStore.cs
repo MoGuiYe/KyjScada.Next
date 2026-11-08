@@ -87,10 +87,7 @@ public static class TrendTemplateStore
             switch (key.ToLowerInvariant())
             {
                 case "variables":
-                    vars = val.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(v => v.Trim())
-                        .Where(v => v.Length > 0)
-                        .ToList();
+                    vars = SplitVariables(val);
                     break;
 
                 case "range": range = ToInt(val, 1); break;
@@ -117,7 +114,14 @@ public static class TrendTemplateStore
             var safeName = SanitizeName(t.Name);
 
             sb.Append('[').Append(safeName).Append(']').Append('\n');
-            sb.Append("Variables=").Append(string.Join(';', t.Variables)).Append('\n');
+            // 变量名要按需加引号:名字里带分号/逗号时原来会被原样拼进去,
+            // 读回来就被拆成两个不存在的变量;带换行还能伪造出 `Envelope=0`
+            // 甚至 `[另一个模板]` 这样的新节 —— 模板文件被打开一次就变形。
+            var names = t.Variables
+                .Select(QuoteVar)
+                .Where(v => v.Length > 0);
+
+            sb.Append("Variables=").Append(string.Join(';', names)).Append('\n');
             sb.Append("Range=").Append(t.RangeIndex).Append('\n');
             sb.Append("Resolution=").Append(t.ResolutionIndex).Append('\n');
             sb.Append("Aggregate=").Append(t.AggregateIndex).Append('\n');
@@ -128,6 +132,85 @@ public static class TrendTemplateStore
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 变量名按需加双引号(内含分隔符时),内部引号双写。
+    /// 换行没有可表示的形式,统一折成空格 —— 宁可名字对不上被跳过,
+    /// 也不能让它拼出额外的键行/节行。
+    /// </summary>
+    public static string QuoteVar(string? varName)
+    {
+        var s = (varName ?? "").Replace('\r', ' ').Replace('\n', ' ');
+
+        if (s.Length == 0) return "";
+
+        var needQuote = s.IndexOfAny(new[] { ';', ',', '"' }) >= 0 || s != s.Trim();
+
+        if (!needQuote) return s;
+
+        return "\"" + s.Replace("\"", "\"\"") + "\"";
+    }
+
+    /// <summary>
+    /// 按 ';'/',' 切分变量列表,但**双引号内的分隔符不算**;引号内 "" 表示一个引号。
+    /// 老文件里没有引号,行为与原来的 Split 完全一致。
+    /// </summary>
+    private static List<string> SplitVariables(string val)
+    {
+        var result = new List<string>();
+        var sb = new StringBuilder();
+        var inQuotes = false;
+
+        void AddToken()
+        {
+            var token = sb.ToString().Trim();
+            sb.Clear();
+
+            if (token.Length > 0) result.Add(token);
+        }
+
+        for (var i = 0; i < val.Length; i++)
+        {
+            var c = val[i];
+
+            if (inQuotes)
+            {
+                if (c != '"')
+                {
+                    sb.Append(c);
+                    continue;
+                }
+
+                if (i + 1 < val.Length && val[i + 1] == '"')
+                {
+                    sb.Append('"');
+                    i++;
+                    continue;
+                }
+
+                inQuotes = false;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inQuotes = true;
+                continue;
+            }
+
+            if (c == ';' || c == ',')
+            {
+                AddToken();
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        AddToken();
+
+        return result;
     }
 
     /// <summary>模板名消毒:去掉换行和方括号,防止伪造节结构。</summary>

@@ -26,6 +26,12 @@ public partial class MainWindow
     private readonly List<ReportRow> _reportRows = new();
 
     /// <summary>
+    /// 报表查询/导出进行中。查询要读几十万行、导出要拼几万个单元格,
+    /// 期间必须挡住第二次点击:重入会让两遍查询互相覆盖结果,导出也会写出半截文件。
+    /// </summary>
+    private bool _reportBusy;
+
+    /// <summary>
     /// 初始化报表页:变量列表只列**归档变量**(没归档的查了也是空),
     /// 时间默认今天零点到现在。
     /// </summary>
@@ -120,8 +126,10 @@ public partial class MainWindow
         return anchor.AddHours(bucket * hours);
     }
 
-    private void OnRunReport(object sender, RoutedEventArgs e)
+    private async void OnRunReport(object sender, RoutedEventArgs e)
     {
+        if (_reportBusy) return;
+
         if (_historyRepo is null)
         {
             ReportFooterText.Text = "历史库不可用";
@@ -155,43 +163,34 @@ public partial class MainWindow
             return;
         }
 
-        _reportRows.Clear();
-
         var interval = ReportIntervalSeconds();
         var grains = ReportGrainBox.SelectedIndex;
 
         // 班报对齐到整班起点,否则首班只是"半天",和后续班次不可比
         if (grains == 2) from = AlignToShiftStart(from);
 
+        // 单位只在 UI 线程取一次:FindVarConfig 走的是界面侧的组态缓存,
+        // 不能拿进后台线程用(那边的集合不保证线程安全)。
+        var units = new Dictionary<string, string> (StringComparer.OrdinalIgnoreCase);
+
+        foreach (var v in vars) units[v] = FindVarConfig (v)?.Unit ?? "";
+
+        _reportBusy = true;
+        SetReportBusy (true);
+
         try
         {
-            foreach (var varName in vars)
-            {
-                var raw = _historyRepo.Query(varName, from, to, 200000);
+            ReportFooterText.Text = "正在查询,请稍候…";
 
-                // 复用趋势聚合器:它已经把每个桶的最小/最大/平均算好了
-                var buckets = TrendAggregator.Aggregate(raw, from, to, interval, TrendAggregate.Average);
+            var fromL = from;
+            var toL = to;
 
-                var unit = FindVarConfig(varName)?.Unit ?? "";
+            // 查库搬进后台:一个变量能取 20 万行,十几个变量在 UI 线程上跑,
+            // 窗口会整段白屏(连"查询"都点不动),操作员会以为程序卡死。
+            var rows = await Task.Run (() => BuildReportRows (vars, units, fromL, toL, interval, grains));
 
-                foreach (var b in buckets)
-                {
-                    if (b.IsEmpty) continue;
-
-                    _reportRows.Add(new ReportRow
-                    {
-                        TimeText = grains == 1 || grains == 3
-                            ? b.Time.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
-                            : b.Time.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
-                        VarName = varName,
-                        Unit = unit,
-                        MinText = b.Min.ToString("G6", CultureInfo.InvariantCulture),
-                        MaxText = b.Max.ToString("G6", CultureInfo.InvariantCulture),
-                        AvgText = b.Value.ToString("G6", CultureInfo.InvariantCulture),
-                        CountText = b.Count.ToString(CultureInfo.InvariantCulture)
-                    });
-                }
-            }
+            _reportRows.Clear();
+            _reportRows.AddRange(rows);
 
             ReportGrid.ItemsSource = null;
             ReportGrid.ItemsSource = _reportRows;
@@ -208,6 +207,64 @@ public partial class MainWindow
         {
             ReportFooterText.Text = "查询失败: " + ex.Message;
         }
+        finally
+        {
+            _reportBusy = false;
+            SetReportBusy (false);
+        }
+    }
+
+    /// <summary>
+    /// 后台线程里跑报表查询:查库 + 聚合 + 拼行,全程不碰界面元素。
+    /// 返回的行集合由调用方在 UI 线程上替换进 _reportRows。
+    /// </summary>
+    private List<ReportRow> BuildReportRows (
+        List<string> vars,
+        Dictionary<string, string> units,
+        DateTime from,
+        DateTime to,
+        double interval,
+        int grains)
+    {
+        var rows = new List<ReportRow> ();
+
+        foreach (var varName in vars)
+        {
+            var raw = _historyRepo!.Query (varName, from, to, 200000);
+
+            // 复用趋势聚合器:它已经把每个桶的最小/最大/平均算好了
+            var buckets = TrendAggregator.Aggregate (raw, from, to, interval, TrendAggregate.Average);
+
+            units.TryGetValue (varName, out var unit);
+
+            foreach (var b in buckets)
+            {
+                if (b.IsEmpty) continue;
+
+                rows.Add (new ReportRow
+                {
+                    TimeText = grains == 1 || grains == 3
+                        ? b.Time.ToString ("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                        : b.Time.ToString ("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
+                    VarName = varName,
+                    Unit = unit ?? "",
+                    MinText = b.Min.ToString ("G6", CultureInfo.InvariantCulture),
+                    MaxText = b.Max.ToString ("G6", CultureInfo.InvariantCulture),
+                    AvgText = b.Value.ToString ("G6", CultureInfo.InvariantCulture),
+                    CountText = b.Count.ToString (CultureInfo.InvariantCulture)
+                });
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>查询/导出期间禁用三个按钮,并给出可见提示。</summary>
+    private void SetReportBusy (bool busy)
+    {
+        RunReportButton.IsEnabled = !busy;
+        ExportReportButton.IsEnabled = !busy;
+        ExportReportExcelButton.IsEnabled = !busy;
     }
 
     private static bool TryParseReportTime(string? text, out DateTime value)
@@ -225,6 +282,8 @@ public partial class MainWindow
     /// </summary>
     private void OnExportReport(object sender, RoutedEventArgs e)
     {
+        if (_reportBusy) return;
+
         if (!HasPermission(KyjScada.Domain.Users.PermissionBit.CanViewReport))
         {
             ReportFooterText.Text = "没有「报表查看」权限";
@@ -299,8 +358,10 @@ public partial class MainWindow
     ///  导出的表常被转发、被另存、被上传到别的系统,公式一断链就是一堆 #REF!。
     ///  数字写死比公式可靠。
     /// </summary>
-    private void OnExportReportExcel(object sender, RoutedEventArgs e)
+    private async void OnExportReportExcel(object sender, RoutedEventArgs e)
     {
+        if (_reportBusy) return;
+
         if (!HasPermission(KyjScada.Domain.Users.PermissionBit.CanViewReport))
         {
             ReportFooterText.Text = "没有「报表查看」权限";
@@ -329,13 +390,24 @@ public partial class MainWindow
             var mode = ReportTemplateBox?.SelectedIndex ?? 0;
             var sheets = new List<XlsxSheet>();
 
+            // 三个工作表在 UI 线程拼:Build*Sheet 和 AddTitleLines 会读界面上的
+            // 时间框与模板选择,拿进后台线程就是跨线程访问 UI。
             if (mode != 2) sheets.Add (BuildDetailSheet ());
             if (mode != 1) sheets.Add (BuildSummarySheet ());
             if (mode == 0) sheets.Add (BuildShiftSheet ());
 
             if (sheets.Count == 0) sheets.Add (BuildDetailSheet ());
 
-            XlsxWriter.Write (dlg.FileName, sheets.ToArray ());
+            var path = dlg.FileName;
+            var arr = sheets.ToArray ();
+
+            _reportBusy = true;
+            SetReportBusy (true);
+            ReportFooterText.Text = "正在生成 Excel,请稍候…";
+
+            // 写盘搬后台:几万个单元格要逐个生成 XML 再压缩成 zip,
+            // 期间界面完全无响应,连"导出完成"的提示都要等它结束才刷得出来。
+            await Task.Run (() => XlsxWriter.Write (path, arr));
 
             ReportFooterText.Text = "已导出 " + _reportRows.Count + " 行 · " + sheets.Count
                 + " 个工作表 → " + dlg.FileName;
@@ -343,6 +415,11 @@ public partial class MainWindow
         catch (Exception ex)
         {
             ReportFooterText.Text = "导出失败: " + ex.Message;
+        }
+        finally
+        {
+            _reportBusy = false;
+            SetReportBusy (false);
         }
     }
 
