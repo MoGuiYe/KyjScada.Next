@@ -69,6 +69,7 @@ dotnet build KyjScada.Next.sln -v m          # 期望: 0 错误（124 条既有�
 | 查现场问题（通讯断、库锁、卡顿） | [10 构建调试与排障](10-构建调试与排障.md) | — | — |
 | 加测试 / 判断改完能不能交付 | [11 测试与验收基线](11-测试与验收基线.md) | — | `KyjScada.*.Tests\` |
 | 要改历史库表结构（跨设备同名变量、时间精度） | [13 历史库改造方案](13-历史库改造方案-跨设备与时间精度.md) | 02 的表结构 | `HistorySchema.cs` / `HistoryRepository.cs` |
+| 接读屏软件 / 写 UI 自动化脚本 | [14 无障碍与 UI 自动化](14-无障碍与UI自动化.md) | 07 | 各窗口 `.xaml` 的 `AutomationProperties` |
 
 ---
 
