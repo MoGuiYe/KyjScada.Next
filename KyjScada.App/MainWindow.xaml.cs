@@ -3100,6 +3100,69 @@ private void TickAlarmPage ()
         AlarmText.Text = active.Count + " 个活动报警:  " + string.Join ("    |    ", parts);
     }
 
+    /// <summary>
+    /// 重新从磁盘读组态,并把当前设备的对象换成新的一份。
+    ///
+    /// 只做界面侧能安全重建的部分:写入页/点动页的可写判定(IsWritable、CanWrite)
+    /// 全部重新算一遍。采集用的连接/寄存器映射是在流水线里编译的,
+    /// 那部分仍要重启程序 —— 提示里照实说。
+    /// </summary>
+    private void ReloadConfigFromDisk ()
+    {
+        try
+        {
+            var dir = FindSettingsDir () ?? _settingsDir;
+
+            if (dir is null) return;
+
+            var loaded = SettingsJsonCodec.LoadDirectory (dir);
+
+            var devices = loaded.Project.AllDevices ().ToList ();
+
+            if (devices.Count == 0)
+            {
+                FooterText.Text = "配置编辑器已关闭:重读后没有任何设备,请检查配置文件。";
+
+                return;
+            }
+
+            var name = _device?.DeviceName;
+
+            var fresh = devices.FirstOrDefault (d =>
+                            string.Equals (d.DeviceName, name, StringComparison.OrdinalIgnoreCase))
+                        ?? _device;
+
+            _deviceList = devices;
+            _deviceFiles = loaded.DeviceFiles;
+
+            BuildDeviceSelector ();
+
+            if (fresh is not null && !ReferenceEquals (fresh, _device))
+            {
+                // 同名新对象:换上去,但不要重开采集(那是流水线的事,重启才生效)
+                _device = fresh;
+
+                var idx = _deviceList.IndexOf (fresh);
+
+                if (idx >= 0)
+                {
+                    _switchingDevice = true;
+                    DeviceBox.SelectedIndex = idx;
+                    _switchingDevice = false;
+                }
+            }
+
+            BuildWritePage ();
+            BuildJogPage ();
+
+            FooterText.Text = "配置已重新读取:写入页/点动页按新组态刷新。采集参数(地址/组)改动需重启程序生效。";
+        }
+        catch (Exception ex)
+        {
+            FooterText.Text = "重读配置失败: " + ex.Message;
+        }
+    }
+
     /// <summary>打开配置编辑器(独立窗口)。</summary>
     private void OnOpenConfigEditor (object sender, RoutedEventArgs e)
     {
@@ -3138,8 +3201,10 @@ private void TickAlarmPage ()
 
             win.ShowDialog ();
 
-            // 配置改了要重新加载才生效:采集服务在启动时把组/变量编译进内存
-            FooterText.Text = "配置编辑器已关闭。若改过配置,请重启程序使新配置生效。";
+            // 编辑完立刻重读组态:用户勾了「允许下发写入」回到主界面还是 0 个点,
+            // 会以为勾了没用(实际只是没重启)。这里直接把盘上的配置读回来,
+            // 重建写入页/点动页;采集侧改动仍要重启才彻底生效,所以在提示里说清。
+            ReloadConfigFromDisk ();
         }
         catch (Exception ex)
         {

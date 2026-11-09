@@ -441,6 +441,49 @@ KyjScada.Infrastructure.Tests.CommandGateAuditTests.RunAll(Run);
             KyjScada.Infrastructure.Tests.TestHelpers.AssertEq (129, total, "这份配置共 129 个变量");
         });
 
+Run("点动候选:现场配置把「状态值」组标为可写后,52 个 Bool 全部可点动", () =>
+{
+    var path = FindRealSettings();
+
+    if (path is null) throw new SkipTestException("找不到现场配置(用例依赖现场变量表)");
+
+    var project = KyjScada.Domain.Config.SettingsJsonCodec.ActiveProject(
+        KyjScada.Domain.Config.SettingsJsonCodec.LoadFile(path));
+
+    var dev = project!.AllDevices().First();
+
+    KyjScada.Domain.Config.GroupConfig GroupOf(string varName) =>
+        dev.GroupList.First(g => g.VarList != null && g.VarList.Any(x => x.VarName == varName));
+
+    bool CanWriteVar(string varName)
+    {
+        var g = GroupOf(varName);
+
+        return KyjScada.Runtime.JogPoints.IsWritableGroup(g)
+            && KyjScada.Infrastructure.Acquisition.ModbusAcquisitionService.CanWrite(
+                g.Start, g.VarList.First(x => x.VarName == varName), out _);
+    }
+
+    // 现场原始配置里没有任何组写 IsWritable → 只有「设定值」按组名兜底算可写,
+    // 而它 24 个点全是 Float;Bool 全在「状态值」组,所以点动页显示 0 个是对的。
+    var before = KyjScada.Runtime.JogPoints.Select(dev, CanWriteVar);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertEq(0, before.Count(p => p.IsBool),
+        "原始配置下可点动的 Bool 点应为 0");
+
+    // 授权「状态值」组(= 编辑器里勾「允许下发写入」)后,52 个 Bool 应全部出现
+    var state = dev.GroupList.First(g => g.GroupName != null && g.GroupName.Contains("状态值"));
+    state.IsWritable = true;
+
+    var after = KyjScada.Runtime.JogPoints.Select(dev, CanWriteVar);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertEq(52, after.Count(p => p.IsBool),
+        "授权后 52 个 Bool 应全部成为点动候选");
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertEq(52,
+        KyjScada.Runtime.JogPoints.EStopTargets(after).Count, "急停目标应为 52 个 Bool");
+});
+
 Run("界面行模型:现场在跑的 RTU-over-TCP 设备 139 个变量", () =>
 {
     var dir = FindRealSettingsDir();
