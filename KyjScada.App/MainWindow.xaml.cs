@@ -2510,9 +2510,9 @@ private void OnLoginClick (object sender, RoutedEventArgs e)
         // 注销:关掉写入并清空身份
         _currentUser = null;
 
-        if (_gate is not null) _gate.Enabled = false;
-
-        if (WriteEnableBox is not null) WriteEnableBox.IsChecked = false;
+        // 必须走 SetGateEnabled:只关 _gate 和写入页的勾选框,点动页那个勾还亮着,
+        // 用户看到"闸门已开"。两页共用一个闸门,状态就得一处改、两处同步。
+        SetGateEnabled (false);
 
         UpdateUserDisplay ();
         ApplyWritePermission ();
@@ -2590,9 +2590,8 @@ private void ApplyWritePermission ()
 
     if (!canWrite)
     {
-        WriteEnableBox.IsChecked = false;
-
-        if (_gate is not null) _gate.Enabled = false;
+        // 同样走统一入口:收回权限时两页的勾选框和提示文字要一起变
+        SetGateEnabled (false);
     }
 
     if (WriteInfoText is not null)
@@ -2687,7 +2686,9 @@ private void BuildWritePage ()
     WriteList.ItemsSource = null;
     WriteList.ItemsSource = _writeRows;
 
-    WriteEnableBox.IsChecked = false;
+    // 换设备重建写入页:勾选框清空的同时闸门必须真的关掉,
+    // 否则界面显示"未允许写入"、后台仍能下发命令(点动页的勾也是同一个闸门)。
+    SetGateEnabled (false);
 
     WriteInfoText.Text = "可写点 " + _writeRows.Count + " 个";
 

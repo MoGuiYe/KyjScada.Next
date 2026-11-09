@@ -170,7 +170,14 @@ public static class TrendCsv
         // 公式注入:变量名/单位来自组态(可由界面编辑,也可能来自导入的配置),
         // 以 = + - @ 开头时 Excel/WPS 会当公式执行,最坏能拉起 DDE/外部命令。
         // 前面加单引号,Excel 按文本显示,后端的 CSV 解析也能原样读回。
-        if (s[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
+        //
+        // 必须**先看第一个非空白字符**:Excel 会忽略前导空格再解析公式,
+        // 于是 " =1+1" 照样被求值,而只看 s[0] 的写法放它直接过去。
+        var first = 0;
+
+        while (first < s.Length && (s[first] is ' ' or '\t')) first++;
+
+        if (first < s.Length && s[first] is '=' or '+' or '-' or '@' or '\t' or '\r')
         {
             s = "'" + s;
         }

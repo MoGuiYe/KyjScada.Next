@@ -162,10 +162,18 @@ public static class TrendTemplateStore
         var sb = new StringBuilder();
         var inQuotes = false;
 
+        // 带引号的 token **不能 Trim**:EscapeVariable 正是因为"首尾有空格"才给它加引号,
+        // 存下来再读时又无条件 Trim,等于打开一次模板就把这个变量名改坏
+        // (后续按名字找不到点,模板里那一格直接变空)。没加引号的仍按老规则修剪。
+        var quoted = false;
+
         void AddToken()
         {
-            var token = sb.ToString().Trim();
+            var raw = sb.ToString();
+            var token = quoted ? raw : raw.Trim();
+
             sb.Clear();
+            quoted = false;
 
             if (token.Length > 0) result.Add(token);
         }
@@ -196,6 +204,7 @@ public static class TrendTemplateStore
             if (c == '"')
             {
                 inQuotes = true;
+                quoted = true;
                 continue;
             }
 

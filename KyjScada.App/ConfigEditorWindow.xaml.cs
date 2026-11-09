@@ -1256,7 +1256,9 @@ private static List<List<string>> SplitCsvRecords(string text)
     {
         if (string.IsNullOrEmpty(s)) return "";
 
-        return s.IndexOfAny(new[] { ',', '"', '\n' }) < 0
+        // 触发字符必须和读写两侧一致:导出的解析器按 \n 拆行、并按 \r 处理 CRLF,
+        // 漏掉 '\r' 时含裸 CR 的字段不套引号 —— 导出再导入就多出一行,往返不互逆。
+        return s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) < 0
             ? s
             : "\"" + s.Replace("\"", "\"\"") + "\"";
     }
