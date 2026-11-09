@@ -144,6 +144,35 @@ public static class JogPoints
         return list;
     }
 
+    /// <summary>
+    /// 列出"有 Bool 点、但整组没开放写入"的组名。
+    ///
+    /// 用途:页面上一个点都没有时,只说"去配置编辑器勾允许写入"太笼统 ——
+    /// 现场根本不知道该勾哪一个组。这里直接把组名列出来。
+    /// 只看组级判定:点位级被拒(寄存器位/协议不支持)不在这里体现,
+    /// 那类点就算勾了允许写入也仍然写不了。
+    /// </summary>
+    public static List<string> LockedBoolGroups (DeviceConfig? device)
+    {
+        var list = new List<string> ();
+
+        if (device?.GroupList is null) return list;
+
+        foreach (var g in device.GroupList)
+        {
+            if (g.VarList is null) continue;
+            if (IsWritableGroup (g)) continue;
+
+            var hasBool = g.VarList.Any (v =>
+                !string.IsNullOrWhiteSpace (v.VarName)
+                && string.Equals ((v.VarType ?? "").Trim (), "bool", StringComparison.OrdinalIgnoreCase));
+
+            if (hasBool) list.Add (g.GroupName ?? "");
+        }
+
+        return list;
+    }
+
     /// <summary>急停目标 = 候选集里的全部 Bool 点。</summary>
     public static List<JogPoint> EStopTargets (IEnumerable<JogPoint> points) =>
         points.Where (p => p.IsBool).ToList ();

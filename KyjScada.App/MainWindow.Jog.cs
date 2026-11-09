@@ -96,7 +96,7 @@ public partial class MainWindow
         if (_jogRows.Count > 0) JogVarBox.SelectedIndex = 0;
 
         JogInfoText.Text = _jogRows.Count == 0
-            ? "可点动的 Bool 点 0 个。要在本页下发命令,先到「配置编辑器」把命令所在组勾上「允许下发写入」。"
+            ? EmptyJogHint ()
             : "可点动的 Bool 点 " + _jogRows.Count + " 个(点动开/关,急停全部写 0)。";
 
         ApplyJogPermissions();
@@ -114,6 +114,31 @@ public partial class MainWindow
     /// 把"上一条命令的结果"覆盖成"写入已启用",还会连带改参数设置页的勾选框。
     /// </summary>
     private bool _syncingGate;
+
+    /// <summary>
+    /// 一个可点动的 Bool 点都没有时,说清"为什么没有、该去勾哪个组"。
+    ///
+    /// 只说一句"去配置编辑器勾允许写入"现场根本不知道勾哪儿:
+    /// 本设备的 Bool 全在「状态值」组,而该组默认不是可写组,
+    /// 用户看到的就是"0 个",以为功能坏了。
+    /// </summary>
+    private string EmptyJogHint()
+    {
+        if (_device is null) return "未选择设备,无法列出可点动的 Bool 点。";
+
+        var locked = KyjScada.Runtime.JogPoints.LockedBoolGroups (_device);
+
+        if (locked.Count == 0)
+        {
+            return "本设备的组里没有 Bool 类型变量:点动/急停只对 Bool 有意义,数值点请到「参数设置」页写入。";
+        }
+
+        var names = string.Join ("」「", locked.Take (4));
+
+        return "可点动的 Bool 点 0 个。本设备还有 Bool 点分布在「" + names
+            + "」组,这些组没有开放写入 —— 要到本页下发命令,先到「配置编辑器」把对应组勾上「允许下发写入」。"
+            + "(寄存器区(4xxxx)的 Bool 即使勾了也写不了,需改用 0xxxx 线圈)";
+    }
 
     /// <summary>按权限开/关本页控件(界面禁用只是提示,事件里还会再校验一次)。</summary>
     private void ApplyJogPermissions()
