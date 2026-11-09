@@ -53,7 +53,11 @@ public static class AcquisitionFactory
 
         try
         {
-            switch (key)
+            // 按 descriptor.Key(注册时的规范写法)分派,不能按配置里的原字符串。
+            // ProtocolRegistry 是 OrdinalIgnoreCase 字典、IsImplementedInV1 也忽略大小写,
+            // 只有这里的 switch 是精确匹配 —— 配置里写成 "modbustcp" 时前面都通过,
+            // 到这里落到 default,界面显示"可采集"、实际报"工厂缺少对应实现"。
+            switch (descriptor.Key)
             {
                 case "ModbusTCP":
                     return new AcquisitionPlan(true, key, name, "",

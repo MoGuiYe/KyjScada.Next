@@ -221,7 +221,7 @@ public sealed class DbReader
 
         // 合并用的行数上限。取 2000 点 × 20 个变量 = 4 万行已经够拼出 2000 个时刻,
         // 再多也只会被 Take(limit) 丢掉。
-        const int MaxFetchRows = 40000;
+        const int MaxFetchRows = 500000;
 
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
@@ -316,13 +316,21 @@ public sealed class DbReader
             // 原来只有 GLOB '[0-9-]*'(首字符是数字或减号),于是 '--'、'12abc'、' 5'、
             // '1.2.3' 这些老库里真实存在的脏值全部混进 CAST: '--' 变 0、'12abc' 变 12,
             // MIN/MAX/AVG 就此失真,而工具照样报"统计正常"。
+            //
+            // 正负号规则要认得**指数**:老库里有 '-1.5e-3'、'1E+5' 这类合法写法,
+            // 早先一句 NOT GLOB '*[-+]*[-+]*' 把凡是带两个符号的都当脏值,
+            // 负指数整类被漏掉(统计少算);而 '1e999'、'5-' 又能混进去(CAST 成 Inf/截断)。
             var strict =
                 " AND TRIM(" + q + ") = " + q +                                   // 不许首尾空格
                 " AND " + q + " NOT GLOB '*[^0-9eE+.-]*'" +                        // 只允许数字/指数/正负号/小数点
                 " AND " + q + " GLOB '*[0-9]*'" +                                 // 至少一个数字(挡 '--'、'-'、'')
+                " AND " + q + " GLOB '*[0-9]'" +                                  // 结尾必须是数字(挡 '5-'、'1.5e-')
                 " AND " + q + " NOT GLOB '*[.]*[.]*'" +                            // 不许两个小数点
-                " AND " + q + " NOT GLOB '*[-+]*[-+]*'" +                          // 不许两个正负号
-                " AND " + q + " NOT GLOB '*[eE]*[eE]*'";                           // 不许两个指数符号
+                " AND " + q + " NOT GLOB '*[eE]*[eE]*'" +                          // 不许两个指数符号
+                " AND (" + q + " NOT GLOB '*[-+]*[-+]*'" +                         // 一个正负号:随便
+                "      OR (" + q + " GLOB '[+-][0-9]*[eE][+-][0-9]*'" +            // 两个正负号:只允许 "-1.5e-3"
+                "          AND " + q + " NOT GLOB '*[-+]*[-+]*[-+]*'))" +          // 三个以上一律脏值
+                " AND ABS(CAST(" + q + " AS REAL)) <= 1e308";                      // 挡 '1e999' 这类溢出成 Inf 的
 
             cmd.CommandText =
                 "SELECT COUNT(*), MIN(CAST(" + q + " AS REAL)), MAX(CAST(" + q + " AS REAL)), " +

@@ -45,6 +45,30 @@ public sealed class TestRunner
             }
         }
 
+        // SKIP 不能悄悄算通过:全被跳过时 CI 仍返回 0,等于"什么都没验证"也报绿。
+        // 默认口径:有失败 → 1;全跳过 → 1;零星跳过 → 0 但要打警告;KYJ_TEST_STRICT=1 时任何跳过都判红。
+        if (_skip > 0)
+        {
+            if (Environment.GetEnvironmentVariable("KYJ_TEST_STRICT") == "1")
+            {
+                Console.WriteLine();
+                Console.WriteLine("✘ 严格模式(KYJ_TEST_STRICT=1):有 " + _skip + " 条用例被跳过,判为失败");
+
+                return 1;
+            }
+
+            if (_pass == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("✘ 全部 " + _skip + " 条用例都被跳过,没有任何断言真正执行");
+
+                return 1;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("⚠ 有 " + _skip + " 条用例被跳过,未验证;发版前请用 KYJ_TEST_STRICT=1 复跑。");
+        }
+
         return _fail == 0 ? 0 : 1;
     }
 }

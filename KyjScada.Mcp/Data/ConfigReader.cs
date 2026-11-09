@@ -21,7 +21,22 @@ public sealed class ConfigReader
     private readonly object _cacheLock = new();
 
     /// <summary>最近一次加载失败的原因(供工具回给调用方);成功时为 null。</summary>
-    public string? LastError { get; private set; }
+    /// 读写都过 _cacheLock:同一个 ConfigReader 会被多个 MCP 请求并发使用,
+    /// 而 Load 的失败分支是在锁外写的,工具侧又会同时在读。
+    public string? LastError
+    {
+        get
+        {
+            lock (_cacheLock) return _lastError;
+        }
+
+        private set
+        {
+            lock (_cacheLock) _lastError = value;
+        }
+    }
+
+    private string? _lastError;
 
     public ConfigReader(string settingsDir)
     {

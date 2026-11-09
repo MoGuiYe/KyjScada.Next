@@ -153,6 +153,11 @@ public sealed class ArchiveService
         batch.AddRange(_pending);
         batch.AddRange(points);
 
+        // 组完批次立刻清空待补队列。
+        // 失败分支是把整个 batch 放回 _pending;若这里不清空,_pending 里还留着旧点,
+        // 放回时旧批次会被重复累加一遍,库恢复后每失败一次就多滚一倍的重复行。
+        _pending.Clear();
+
         // 节拍无论成败都推进:失败不推进的话 10 秒归档会退化成每个采集周期(1 秒)重试,
         // 库写不进去时每秒撞一次错误、LastError 与日志被刷满,现场反而看不到真正原因。
         AdvancePace(sampleTime);
@@ -160,7 +165,6 @@ public sealed class ArchiveService
         try
         {
             var written = _repo.WritePoints(batch);
-            _pending.Clear();
             _lastWrite = sampleTime;
             TotalWritten += written;
             LastError = null;

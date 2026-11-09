@@ -298,11 +298,36 @@ public sealed class LegacyMigrator
 
         report.SysLogTableCreated = true;
 
-        // 重跑保护:LegacySysLog 没有主键,直接再插一遍会把日志整份翻倍,
-        // 而长表/日志表是只增不改的,翻倍之后没法分辨哪份是真的。
+        // 去重底线:给整行加唯一索引,INSERT OR IGNORE 才真的能挡住重复。
+        // 没有唯一键时 OR IGNORE 形同虚设(它只挡约束冲突),表里没有任何约束。
+        // 老库里若本来就有一模一样的重复行,建索引会失败 —— 那就只告警,不阻断迁移。
+        try
+        {
+            using var idx = target.CreateCommand();
+            idx.CommandText =
+                "CREATE UNIQUE INDEX IF NOT EXISTS UX_LegacySysLog ON LegacySysLog (" +
+                string.Join(", ", cols.Select(Quote)) + ");";
+
+            idx.ExecuteNonQuery();
+        }
+        catch (SqliteException ex)
+        {
+            report.Warnings.Add("LegacySysLog 建唯一索引失败(老库存在完全重复的行?):" + ex.Message);
+        }
+
+        // 重跑保护:直接再插一遍会把日志整份翻倍,而日志表只增不改,翻倍之后没法分辨哪份是真的。
         // 整表是在一个事务里写完的 —— 中途失败会整体回滚、表仍为空 ——
         // 所以"表里已经有行"就说明上一次已经迁完,这次直接跳过。
-        var existing = CountRows(target, "LegacySysLog");
+        //
+        // 注意:数不出来(表被锁、库损坏)时**不能**当成 0。
+        // 原来 CountRows 吞异常返回 0,于是"上次迁过但这次数不出来"会整表再插一遍 ——
+        // 恰恰在库已经不太好的时候把日志翻倍。数不出来就放弃本次迁移,警告里说清原因。
+        if (!TryCountRows(target, "LegacySysLog", out var existing, out var countError))
+        {
+            report.Warnings.Add("无法统计 LegacySysLog 现有行数,为避免日志翻倍已跳过本次迁移:" + countError);
+
+            return 0;
+        }
 
         if (existing > 0)
         {
@@ -348,19 +373,38 @@ public sealed class LegacyMigrator
         return written;
     }
 
-    /// <summary>数一张表的行数(表不存在返回 0)。</summary>
-    private static long CountRows(SqliteConnection conn, string table)
+    /// <summary>
+    /// 数一张表的行数。**失败返回 false**,调用方必须区分"表是空的"和"数不出来"。
+    /// 早先这里把异常吞掉返回 0,于是"库里已经有 3000 行但这次没数成"会被当成空表,
+    /// 整份日志再插一遍 —— 库状态越差越容易触发,后果是不可逆的重复数据。
+    /// </summary>
+    private static bool TryCountRows(SqliteConnection conn, string table, out long count, out string error)
     {
+        count = 0;
+        error = "";
+
         try
         {
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT COUNT(*) FROM " + Quote(table);
 
-            return Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            var value = cmd.ExecuteScalar();
+
+            if (value is null || value is DBNull)
+            {
+                error = "COUNT(*) 返回空";
+                return false;
+            }
+
+            count = Convert.ToInt64(value, CultureInfo.InvariantCulture);
+
+            return true;
         }
-        catch (SqliteException)
+        catch (Exception ex)
         {
-            return 0;
+            error = ex.Message;
+
+            return false;
         }
     }
 

@@ -187,7 +187,22 @@ public static class TrendAggregator
     public static List<TrendBucket> Aggregate(
         IReadOnlyList<HistoryRecord> raw, DateTime from, DateTime to, double intervalSeconds, TrendAggregate fn)
     {
+        return Aggregate (raw, from, to, intervalSeconds, fn, out _);
+    }
+
+    /// <summary>
+    /// 同上,但把**实际生效**的间隔带出来。
+    ///
+    /// 桶数超上限时这里会把间隔放大到 span/MaxRawPoints;早先调用方拿到的仍是原值,
+    /// 于是状态栏写着"1 秒/原始",图上实际约 30 秒一桶 —— 用户按 1 秒去读图必然读错。
+    /// </summary>
+    public static List<TrendBucket> Aggregate(
+        IReadOnlyList<HistoryRecord> raw, DateTime from, DateTime to, double intervalSeconds, TrendAggregate fn,
+        out double usedInterval)
+    {
         var result = new List<TrendBucket>();
+
+        usedInterval = intervalSeconds <= 0 ? 1 : intervalSeconds;
 
         if (raw is null || raw.Count == 0) return result;
         if (intervalSeconds <= 0) intervalSeconds = 1;
@@ -207,6 +222,9 @@ public static class TrendAggregator
             bucketCount = MaxRawPoints;
             intervalSeconds = span / bucketCount;
         }
+
+        // 不论有没有放大,都把真正用的间隔回传:调用方显示的分辨率必须和画出来的桶一致
+        usedInterval = intervalSeconds;
 
         // 每桶累积器
         var first = new double[bucketCount];
@@ -353,6 +371,8 @@ public static class TrendAggregator
 
         if (usedInterval <= 0) usedInterval = 1;
 
-        return Aggregate(raw, from, to, usedInterval, fn);
+        // Aggregate 可能在桶数超上限时把间隔放大,必须让它回传实际值,
+        // 否则状态栏显示的分辨率会和图上实际的桶宽对不上。
+        return Aggregate(raw, from, to, usedInterval, fn, out usedInterval);
     }
 }

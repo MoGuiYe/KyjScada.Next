@@ -160,9 +160,13 @@ public sealed class CommandGate
             _audit.Add (new WriteAudit (now, tagName, moduleId, value, null, auditId, tick));
 
             if
+
             (_audit.Count > 2000)
+
             {
-                _audit.RemoveRange (0, 500);
+
+                TrimSettled ();
+
             }
 
             return null;
@@ -345,7 +349,26 @@ public sealed class CommandGate
     /// 名字匹配在并发同名写入时会标错条目,而且大小写敏感(配置里写成 kyJ1_Start
     /// 就找不到 KYJ1_Start 那条,审计永远悬空)。
     /// </summary>
-    private void MarkOutcome (long auditId, bool success)
+    /// <summary>
+    /// 裁剪审计表:只删**已结案**的记录。
+    ///
+    /// 早先是无条件 RemoveRange(0,500),而审计在**下发之前**就落了记录 ——
+    /// 被裁掉的很可能正是在途的那几条;等下发结果回来,MarkOutcome 按 id 找不到记录,
+    /// RevertRateLimit 也就不会执行,于是"设备写失败"被记成一次成功的写,
+    /// 之后正常的重试还会被最小间隔挡住。
+    /// 在途记录最多 MaxConcurrent(每个写入线程一条),永远留得下。
+    /// </summary>
+    private void TrimSettled ()
+    {
+        var settleable = _audit.Count (a => a.Outcome is not null);
+
+        if (settleable == 0) return;
+
+        var drop = Math.Min (settleable, 500);
+
+        _audit.RemoveAll (a => a.Outcome is not null && drop-- > 0);
+    }
+    public void MarkOutcome (long auditId, bool success)
     {
         if (auditId <= 0) return;
 

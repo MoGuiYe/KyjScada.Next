@@ -473,6 +473,29 @@ if (fail > 0)
     foreach (var f in failures) Console.WriteLine("  - " + f);
 }
 
+// SKIP 不能悄悄算通过。
+// 默认口径:有失败 → 1;一条都没真正跑过(全跳过) → 1;零星跳过 → 0 但要打警告。
+// 发版前用 KYJ_TEST_STRICT=1 跑一遍,任何跳过都判红。
+if (skip > 0)
+{
+    if (Environment.GetEnvironmentVariable("KYJ_TEST_STRICT") == "1")
+    {
+        Console.WriteLine();
+        Console.WriteLine("✘ 严格模式(KYJ_TEST_STRICT=1):有 " + skip + " 条用例被跳过,判为失败");
+        return 1;
+    }
+
+    if (pass == 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine("✘ 全部 " + skip + " 条用例都被跳过,没有任何断言真正执行");
+        return 1;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("⚠ 有 " + skip + " 条用例被跳过,未验证;发版前请用 KYJ_TEST_STRICT=1 复跑。");
+}
+
 return fail == 0 ? 0 : 1;
 
 string? FindRealSettings()

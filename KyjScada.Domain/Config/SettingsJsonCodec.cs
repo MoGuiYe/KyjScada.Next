@@ -416,6 +416,54 @@ public static class SettingsJsonCodec
         Dictionary<string, string> DeviceFiles);
 
     /// <summary>
+    /// 恢复被"改名但没改回来"的组态文件。
+    ///
+    /// <see cref="SaveAtomic"/> 的最后兜底是两步:原文件 → .old,临时文件 → 原文件。
+    /// 进程在这两步之间断掉(断电、任务管理器结束、蓝屏),目录里就只剩 ModbusTCP.json.old,
+    /// 而 <see cref="LoadDirectory"/> 只认 *.json —— 现场看到的是"组态全没了",实际文件还在。
+    ///
+    /// 规则:
+    ///  · 只有原文件**确实不存在**时才恢复(.json 在就说明保存成功了,.old 是上一版残留,不动它);
+    ///  · 先试 .old,再试 .bak(更早的兜底);
+    ///  · 恢复失败不抛 —— 读组态这条路径不能因为清理失败而起不来。
+    /// </summary>
+    private static void RecoverOrphans(string dir)
+    {
+        string[] olds;
+
+        try
+        {
+            olds = Directory.GetFiles(dir, "*.json.old");
+        }
+        catch
+        {
+            return;
+        }
+
+        foreach (var old in olds)
+        {
+            var target = old.Substring(0, old.Length - ".old".Length);
+
+            try
+            {
+                if (File.Exists(target)) continue;
+
+                if (File.Exists(old))
+                {
+                    File.Move(old, target, overwrite: true);
+
+                    continue;
+                }
+            }
+            catch
+            {
+                // 只读目录/被占用:保持原样,让上层把文件读不出来当成"没有组态"
+                continue;
+            }
+        }
+    }
+
+    /// <summary>
     /// 加载整个配置目录。
     ///
     /// 现场配置是**按协议分文件**的:ModbusTCP.json / ModbusRTU.json / ModbusRTUOverTCP.json,
@@ -436,6 +484,13 @@ public static class SettingsJsonCodec
         {
             return new LoadedSettings(merged, files, deviceFiles);
         }
+
+        // 先把"改名后没改回来"的文件救回原位。
+        //
+        // SaveAtomic 的兜底路径是 path → path.old、tmp → path 两步走;
+        // 若进程在两步之间断掉(断电/被杀),只剩 xxx.json.old,而下面只认 *.json ——
+        // 表现就是"组态突然全没了,界面上一个设备都没有",其实文件还在,只是名字多了后缀。
+        RecoverOrphans(dir);
 
         var paths = Directory.GetFiles(dir, "*.json")
             .Where(f => !f.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))

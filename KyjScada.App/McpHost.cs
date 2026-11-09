@@ -62,6 +62,11 @@ internal static class McpHost
                 return;
             }
 
+            // app 在 try 外声明:启动失败时 catch 里必须还能拿到它去做 Stop/Dispose。
+            // 原来 app 是 try 内的局部变量,catch 只能把 _app 置 null —— 已经起来的监听没人关,
+            // 端口一直占着,RestartMcp 用同一个端口必然再次失败(现场表现:改了设置重启就再也起不来)。
+            WebApplication? app = null;
+
             try
             {
                 WriteTools.WriteHandler = writeHandler;
@@ -79,7 +84,7 @@ internal static class McpHost
                     .WithTools<ReadOnlyTools>()
                     .WithTools<WriteTools>();
 
-                var app = builder.Build();
+                app = builder.Build();
 
                 app.Urls.Clear();
                 app.Urls.Add("http://127.0.0.1:" + port);
@@ -142,6 +147,21 @@ internal static class McpHost
                 WriteTools.WriteHandler = null;
                 Status = "启动失败:" + ex.Message;
 
+                // 半启动的主机也要关掉:StartAsync 可能已经绑上端口再抛(中间件/工具注册失败),
+                // 不 Stop/Dispose 就是孤儿监听,占着端口直到进程退出。
+                // 用 wait:false —— 这里常在界面线程上,关停等不起。
+                if (app is not null)
+                {
+                    try
+                    {
+                        DisposeApp(app, wait: false);
+                    }
+                    catch
+                    {
+                        // 失败路径上不能再抛
+                    }
+                }
+
                 DiagLog("Start FAIL: " + ex, force: true);
             }
         }
@@ -180,7 +200,37 @@ internal static class McpHost
         // 客户端带 Authorization: Bearer <token> 才放行。
         if (string.IsNullOrEmpty(token)) return true;
 
-        return ctx.Request.Headers["Authorization"].ToString() == "Bearer " + token;
+        return FixedTimeEqualsOne(
+            ctx.Request.Headers["Authorization"].ToString(),
+            "Bearer " + token);
+    }
+
+    /// <summary>
+    /// token 比较必须是恒定时间。用 == 比较字符串时,运行库会在第一个不同字符处返回,
+    /// 比较耗时随"前多少位猜对"变化 —— 攻击者能靠计时把 token 一位一位试出来。
+    ///
+    /// 长度不同时也先补齐再比,避免"长度不对立刻返回"同样泄露长度信息;
+    /// 长度差异本身由返回值体现,不影响结果正确性。
+    /// </summary>
+    private static bool FixedTimeEqualsOne(string? actual, string expected)
+    {
+        actual ??= "";
+
+        var a = System.Text.Encoding.UTF8.GetBytes(actual);
+        var b = System.Text.Encoding.UTF8.GetBytes(expected);
+
+        var len = Math.Max(a.Length, b.Length);
+
+        var pa = new byte[len];
+        var pb = new byte[len];
+
+        Array.Copy(a, pa, a.Length);
+        Array.Copy(b, pb, b.Length);
+
+        // 两个条件都要算完再与,不能短路 —— 短路会把长度差异泄露成时间差
+        var same = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(pa, pb);
+
+        return same && a.Length == b.Length;
     }
 
     /// <summary>

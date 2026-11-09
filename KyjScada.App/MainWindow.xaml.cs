@@ -464,12 +464,28 @@ public partial class MainWindow : Window
         // 开关在「系统设置」里;关掉时传 0(= 不启动),但端口值保留在 ini 里
         var port = _appSettings.McpEnabled ? _appSettings.McpPort : 0;
 
-        McpHost.Start (settingsDir, dbPath, port, McpWrite);
-
-        if (port > 0)
+        if (port <= 0)
         {
-            FooterText.Text = "MCP " + McpHost.Status;
+            McpHost.Start (settingsDir, dbPath, 0, McpWrite);
+
+            return;
         }
+
+        // 启动要等 Kestrel 真正绑上端口(最多 10 秒),不能拿界面线程去等:
+        // 端口被占用时那 10 秒会表现为"程序卡死"。启动期间界面照常可用。
+        FooterText.Text = "MCP 正在启动…";
+
+        Task.Run (() =>
+        {
+            McpHost.Start (settingsDir, dbPath, port, McpWrite);
+
+            var status = McpHost.Status;
+
+            Dispatcher.BeginInvoke (new Action (() =>
+            {
+                FooterText.Text = "MCP " + status;
+            }));
+        });
     }
 
     /// <summary>

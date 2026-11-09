@@ -26,6 +26,20 @@ public sealed class ReadOnlyTools
         _db = db;
     }
 
+    /// <summary>
+    /// 组态读不出来时回给调用方的文本:必须带上 <see cref="ConfigReader.LastError"/>。
+    /// 只回"无法解析组态文件"时,AI 会当成"这台机器没有组态"转头去查别的东西;
+    /// 真实原因(文件被占用/JSON 写了一半/空数组)恰恰是排查的唯一线索。
+    /// </summary>
+    private string ConfigLoadFailure(string fileName)
+    {
+        var why = _config.LastError;
+
+        return string.IsNullOrWhiteSpace (why)
+            ? $"无法解析组态文件: {fileName}"
+            : $"无法解析组态文件: {fileName};原因: {why}";
+    }
+
     [McpServerTool, Description("列出监控变量元数据(名称/类型/中文描述/单位/是否归档/报警阈值)。不传 keyword 返回全部。")]
     public string ListVariables(
         [Description("按变量名或中文描述过滤,不区分大小写;留空返回全部")] string? keyword = null)
@@ -69,7 +83,7 @@ public sealed class ReadOnlyTools
 
         var project = _config.Load(pick);
         if (project == null)
-            return $"无法解析组态文件: {pick}";
+            return ConfigLoadFailure(pick);
 
         var all = _config.EnumerateVariables(project).ToList();
         var filtered = keyword == null
@@ -316,6 +330,10 @@ public sealed class ReadOnlyTools
     {
         if (limit <= 0) limit = 100;
 
+        // 上限必须钳住:limit 直通 SQL,LIMIT int.MaxValue 会把整张日志读进内存,
+        // 而 MCP 客户端传大数是很常见的(它们只按 schema 填参,不看语义)。
+        if (limit > 500) limit = 500;
+
         // 不传时间就查最近 24 小时:调用方(尤其是自动化客户端)经常只给工具名,不给参数,
         // 以前会直接抛 ArgumentNullException,协议层只回一句 "An error occurred",看不出问题。
         //
@@ -405,6 +423,12 @@ public sealed class ReadOnlyTools
                         sb.AppendLine($"    组: {g.GroupName}  起始={g.Start}  长度={g.Length}  变量={g.VarList.Count}");
                     }
                 }
+            }
+            else
+            {
+                // 读不出来要说清是"文件坏了"还是"文件没有":只说"没组态",
+                // AI 会当成"这台机器没配置",然后去查不存在的数据。
+                sb.AppendLine(ConfigLoadFailure(pick));
             }
         }
 

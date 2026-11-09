@@ -825,10 +825,12 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
         var type = (v.VarType ?? "").Trim ().ToLowerInvariant ();
 
-        // 位地址必须拒绝:Modbus 没有"写单个位"的功能码
+        // 位地址必须拒绝:Modbus 没有"写单个位"的功能码,要读-改-写;
+        // 而写入路径遇到寄存器区 Bool 又提示"去加位号",两处一起把这条配置变成死路。
         if (TryParseVarAddress (v, out _, out var bit) && bit >= 0)
         {
-            reason = "位地址需要读改写,当前不支持写入";
+            reason = "寄存器位地址(4xxxx.NN)不支持写入:Modbus 没有写单个位的功能码,"
+                + "写整字会清零同寄存器其他位;该点请改用 0xxxx 线圈地址";
             return false;
         }
 
@@ -963,9 +965,12 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                 // 现场表现是"改了一个开关,旁边十几个点全掉了" —— 而且读回来一切正常,
                 // 很难查到是这里。
                 // Modbus 也没有"写某一位"的功能码,只能读-改-写,还得防并发覆盖;
-                // 无位号时无从知道该动哪一位,所以明确拒绝并提示怎么改配置。
-                error = "Bool 变量 " + target.Start + " 落在寄存器区,整字写入会清零其余位;"
-                    + "请在地址后加位号(如 40010.03),或改用 0xxxx 线圈";
+                // 无位号时无从知道该动哪一位,所以明确拒绝。
+                // 提示不能再写"加位号":加了位号的点在 CanWrite 里同样被拒(见上面的位地址分支),
+                // 照着旧提示改配置只会让这个点从可写列表里消失,现场以为"功能坏了"。
+                error = "Bool 变量 " + target.Start + " 落在寄存器区(4xxxx),本版本不支持寄存器位写入:"
+                    + "Modbus 没有写单个位的功能码,写整字会把同寄存器其余 15 位清零;"
+                    + "该点请改用 0xxxx 线圈地址";
 
                 return false;
             }
