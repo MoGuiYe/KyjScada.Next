@@ -948,20 +948,15 @@
                                         </Style>
                                     </ComboBox.ItemContainerStyle>
                                 </ComboBox>
-                                <TextBlock Text="强制值:" Foreground="#C6CDE0" Margin="20,0,6,0" VerticalAlignment="Center" FontSize="12"/>
-                                <TextBox x:Name="ForceValueBox" Width="80" Height="28" Text="1"
-                                         Background="#11111B" Foreground="#FFFFFF" BorderBrush="#45475A" Padding="4,2"/>
-                                <Button x:Name="ForceWriteBtn" Content="强制写入" Width="96" Height="28" Margin="10,0,0,0" Click="OnForceWrite"
-                                        Background="#313244" Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
                             </WrapPanel>
-                            <TextBlock x:Name="JogHintText" Text="点动只对 Bool 有效(开/关),强制写对所有数值类型有效。写入走与参数设置相同的命令闸门(串行化+限速+审计)。"
+                            <TextBlock x:Name="JogHintText" Text="本页只做 Bool 开关量:点动开 = 写 1,点动关 = 写 0,急停 = 全部写 0。数值写入请到「参数设置」页。写入走与参数设置相同的命令闸门(串行化+限速+审计)。"
                                        Foreground="#8C93AB" Margin="0,8,0,0" FontSize="11" TextWrapping="Wrap"/>
                         </StackPanel>
                     </Border>
 
                     <!-- 可写 Bool 点清单 -->
                     <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="0,0,0,8">
-                        <TextBlock x:Name="JogInfoText" Text="可写 Bool 点:加载中..." Foreground="#C6CDE0" FontSize="12"/>
+                        <TextBlock x:Name="JogInfoText" Text="可点动的 Bool 点:加载中..." Foreground="#C6CDE0" FontSize="12"/>
                     </Border>
 
                     <DataGrid Grid.Row="3" x:Name="JogGrid"
@@ -973,8 +968,8 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="组" Binding="{Binding GroupName}" Width="110"/>
                             <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
-                            <DataGridTextColumn Header="类型" Binding="{Binding VarType}" Width="80"/>
-                            <DataGridTextColumn Header="当前值" Binding="{Binding CurrentText}" Width="110"/>
+                            <DataGridTextColumn Header="状态" Binding="{Binding CurrentText}" Width="110"/>
+                            <DataGridTextColumn Header="注释" Binding="{Binding Comments}" Width="*"/>
                         </DataGrid.Columns>
                     </DataGrid>
 

@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using KyjScada.Domain.Config;
@@ -9,18 +8,12 @@ using KyjScada.Runtime;
 namespace KyjScada.App;
 
 /// <summary>
-/// 急停/点动页。
-///
-/// 为什么列出"所有可写点"而不是只列 Bool:
-///   真实现场配置里 52 个 Bool 全在「状态值」组,而该组默认没有可写标记,
-///   只列 Bool 会导致页面上一个点都没有。这里改成列出所有闸门认可的可写点,
-///   点动只对 Bool 开放(开/关两态),强制写对任何数值类型都可用。
+/// 急停/点动页:只做 Bool 开关量(写 1 / 写 0),没有任何数值输入框。
 ///
 /// 安全设计:
 ///  1. 急停 = 把清单里所有 Bool 可写点写 0,执行前弹确认并列出将受影响的点数
 ///  2. 点动 = 选中 Bool 点写 1 / 写 0,需 CanJog
-///  3. 强制 = 写指定值并保持,需 CanForce + 确认弹窗
-///  4. 所有写入走同一个 CommandGate(串行化/限速/审计),与参数设置页共享
+///  3. 所有写入走同一个 CommandGate(串行化/限速/审计),与参数设置页共享
 /// </summary>
 public partial class MainWindow
 {
@@ -80,7 +73,8 @@ public partial class MainWindow
         if (_device is not null && _gate is not null)
         {
             // 候选集规则在 Runtime/JogPoints(可单测),这里只做视图映射
-            foreach (var p in KyjScada.Runtime.JogPoints.Select (_device, _gate.IsWritable))
+            // 只留 Bool:数值点在本页既没有开/关语义,也没有可填的值
+            foreach (var p in KyjScada.Runtime.JogPoints.Select (_device, _gate.IsWritable).Where (p => p.IsBool))
             {
                 _jogRows.Add (new JogRow
                 {
@@ -101,12 +95,9 @@ public partial class MainWindow
         JogVarBox.ItemsSource = _jogRows;
         if (_jogRows.Count > 0) JogVarBox.SelectedIndex = 0;
 
-        var boolCount = _jogRows.Count(r => r.IsBool);
-
         JogInfoText.Text = _jogRows.Count == 0
-            ? "可写点 0 个。要在本页下发命令,先到「配置编辑器」把命令所在组勾上「允许下发写入」。"
-            : "可写点 " + _jogRows.Count + " 个(其中 Bool " + boolCount + " 个)。"
-              + "点动只对 Bool 有效,强制写对所有数值类型有效。";
+            ? "可点动的 Bool 点 0 个。要在本页下发命令,先到「配置编辑器」把命令所在组勾上「允许下发写入」。"
+            : "可点动的 Bool 点 " + _jogRows.Count + " 个(点动开/关,急停全部写 0)。";
 
         ApplyJogPermissions();
     }
@@ -128,15 +119,12 @@ public partial class MainWindow
     private void ApplyJogPermissions()
     {
         var hasJog = HasPermission(PermissionBit.CanJog);
-        var hasForce = HasPermission(PermissionBit.CanForce);
         var hasAny = _jogRows.Count > 0;
         var idle = !_jogBusy;
 
-        if (EstopBtn is not null) EstopBtn.IsEnabled = hasJog && idle && _jogRows.Any(r => r.IsBool);
+        if (EstopBtn is not null) EstopBtn.IsEnabled = hasJog && idle && hasAny;
         if (JogOnBtn is not null) JogOnBtn.IsEnabled = hasJog && idle && hasAny;
         if (JogOffBtn is not null) JogOffBtn.IsEnabled = hasJog && idle && hasAny;
-        if (ForceWriteBtn is not null) ForceWriteBtn.IsEnabled = hasForce && idle && hasAny;
-        if (ForceValueBox is not null) ForceValueBox.IsEnabled = hasForce && idle && hasAny;
         if (JogVarBox is not null) JogVarBox.IsEnabled = hasAny && idle;
 
         // 与「参数设置」页共用同一个命令闸门,这里只显示/切换它的状态
@@ -335,7 +323,7 @@ public partial class MainWindow
 
         if (!row.IsBool)
         {
-            JogResultText.Text = "✘ " + row.VarName + " 是 " + row.VarType + " 类型,点动只支持 Bool。数值点请用「强制写入」。";
+            JogResultText.Text = "✘ " + row.VarName + " 是 " + row.VarType + " 类型,点动只支持 Bool。数值写入请到「参数设置」页。";
             return;
         }
 
@@ -365,68 +353,6 @@ public partial class MainWindow
         }
     }
 
-    /// <summary>强制写:CanForce + 确认弹窗。目标 = 选中变量,任何数值类型都可用。</summary>
-    private async void OnForceWrite(object sender, RoutedEventArgs e)
-    {
-        if (_gate is null) return;
-
-        if (_jogBusy)
-        {
-            JogResultText.Text = "✘ 上一条命令还在下发,请稍候";
-            return;
-        }
-
-        if (!HasPermission(PermissionBit.CanForce))
-        {
-            JogResultText.Text = "✘ 没有「强制」权限(仅管理员/授权账号)";
-            return;
-        }
-
-        var row = SelectedJogRow();
-        if (row is null)
-        {
-            JogResultText.Text = "✘ 请先在上方选择目标变量";
-            return;
-        }
-
-        if (!double.TryParse(ForceValueBox.Text, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
-        {
-            JogResultText.Text = "强制值不是有效数字: " + ForceValueBox.Text;
-            return;
-        }
-
-        var answer = MessageBox.Show(
-            "确认强制写入?\n\n变量: " + row.VarName + "  (" + row.VarType + ")\n值: " + value +
-            "\n\n强制写会保持该值直到下次修改,请确认设备状态允许。",
-            "强制写确认", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-
-        if (answer != MessageBoxResult.Yes) return;
-
-        JogResultText.Text = "正在强制写入…";
-
-        var gate = _gate;
-        var name = row.VarName;
-
-        _jogBusy = true;
-        ApplyJogPermissions ();
-
-        try
-        {
-            var r = await Task.Run(() => gate.Write(name, value, "force")).ConfigureAwait(true);
-
-            JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " 强制: " + r.Message;
-        }
-        catch (Exception ex)
-        {
-            JogResultText.Text = "✘ " + name + " 强制写异常: " + ex.Message;
-        }
-        finally
-        {
-            _jogBusy = false;
-            ApplyJogPermissions ();
-        }
-    }
-
     /// <summary>刷新当前值(页签可见时)。</summary>
     private void TickJogPage()
     {
@@ -440,7 +366,7 @@ public partial class MainWindow
             var d = tv?.AsDouble();
 
             row.CurrentText = d.HasValue
-                ? (row.IsBool ? (d.Value != 0 ? "ON" : "OFF") : d.Value.ToString("G6"))
+                ? (d.Value != 0 ? "ON" : "OFF")
                 : "--";
         }
 
