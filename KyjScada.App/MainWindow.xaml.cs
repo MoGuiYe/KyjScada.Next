@@ -596,6 +596,7 @@ public partial class MainWindow : Window
                 _trendAllVars.Add (new TrendSelectItem
                 {
                     Name = v.VarName,
+                    Comments = v.Comments ?? "",
                     Unit = v.Unit ?? "",
                     Color = TrendColors[idx % TrendColors.Length]
                 });
@@ -1090,6 +1091,7 @@ public partial class MainWindow : Window
             series.Add (new TrendSeries
             {
                 VarName = item.Name,
+                Comments = item.Comments,
                 Unit = item.Unit,
                 Color = item.Color,
                 Points = buckets,
@@ -1140,7 +1142,7 @@ public partial class MainWindow : Window
 
             if (visible.Count == 0)
             {
-                parts.Add (s.VarName + " 无数据");
+                parts.Add (NameWithComment (s.VarName, s.Comments) + " 无数据");
                 continue;
             }
 
@@ -1150,7 +1152,7 @@ public partial class MainWindow : Window
             var avg = visible.Average (p => p.Value);
             var unit = string.IsNullOrEmpty (s.Unit) ? "" : s.Unit;
 
-            parts.Add (s.VarName + ": " + visible.Count + "点, 最小 " + lo.ToString ("G5")
+            parts.Add (NameWithComment (s.VarName, s.Comments) + ": " + visible.Count + "点, 最小 " + lo.ToString ("G5")
                 + ", 最大 " + hi.ToString ("G5")
                 + ", 平均 " + avg.ToString ("G5") + (unit.Length > 0 ? " " + unit : ""));
         }
@@ -1277,6 +1279,64 @@ public partial class MainWindow : Window
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 变量名 → 组态中文描述。查不到返回 ""。
+    ///
+    /// 为什么搜**所有设备**而不是只看 _device:报警历史里可能混着别的设备的点位
+    /// (切过设备之后旧报警还在列表里),只查当前设备会出现"这一段空白备注"。
+    /// 结果缓存起来:报警表一次刷 1000 行,逐行线性搜索会把界面拖卡。
+    /// </summary>
+    private string CommentsOf (string varName)
+    {
+        if (string.IsNullOrWhiteSpace (varName)) return "";
+
+        if (_commentCache.TryGetValue (varName, out var cached)) return cached;
+
+        var text = "";
+
+        foreach (var dev in _deviceList)
+        {
+            if (dev?.GroupList is null) continue;
+
+            foreach (var g in dev.GroupList)
+            {
+                if (g.VarList is null) continue;
+
+                foreach (var v in g.VarList)
+                {
+                    if (!string.Equals (v.VarName, varName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    text = (v.Comments ?? "").Trim();
+
+                    break;
+                }
+            }
+
+            if (text.Length > 0) break;
+        }
+
+        _commentCache[varName] = text;
+
+        return text;
+    }
+
+    /// <summary>变量名 → 备注 的缓存(组态重载时清空)。</summary>
+    private readonly Dictionary<string, string> _commentCache = new (StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// "变量名(备注)" —— 界面上凡出现变量名的地方都该用它。
+    ///
+    /// 现场变量名几乎全是英文缩写,只写 LQB1_Fre_Set 等于没写;
+    /// 但反过来只显示备注也不行:对配置、写脚本、报故障都要用变量名。
+    /// 所以固定成"名字在前、备注在后"的一句话。
+    /// </summary>
+    private static string NameWithComment (string varName, string? comments)
+    {
+        var note = (comments ?? "").Trim();
+
+        return note.Length == 0 ? varName : varName + "(" + note + ")";
     }
 
     private void OnTrendZoomIn (object sender, RoutedEventArgs e)
@@ -1505,7 +1565,7 @@ public partial class MainWindow : Window
             var markers = triggers
                 .Select (r => new TrendEventMarker (
                     r.At,
-                    r.VarName + (r.Direction == 0 ? " 上限" : " 下限") + "报警",
+                    NameWithComment (r.VarName, CommentsOf (r.VarName)) + (r.Direction == 0 ? " 上限" : " 下限") + "报警",
                     true))
                 .ToList ();
 
@@ -1518,7 +1578,8 @@ public partial class MainWindow : Window
                 {
                     At = r.At,
                     TimeText = r.At.ToString ("HH:mm:ss"),
-                    Text = r.VarName + (r.Direction == 0 ? " 上限" : " 下限")
+                    Text = NameWithComment (r.VarName, CommentsOf (r.VarName))
+                           + (r.Direction == 0 ? " 上限" : " 下限")
                            + " (" + r.Value.ToString ("G5") + ")"
                 })
                 .ToList ();
@@ -1773,6 +1834,7 @@ public partial class MainWindow : Window
             list.Add (new CursorReadout
             {
                 Label = r.VarName,
+                Comments = CommentsOf (r.VarName),
                 Value = r.ValueText + unit,
                 Color = r.Color
             });
@@ -1802,6 +1864,7 @@ public partial class MainWindow : Window
                 _rows.Add (new ValueRow
                 {
                     Name = v.VarName,
+                    Comments = v.Comments ?? "",
                     VarType = v.VarType ?? "",
                     Unit = v.Unit ?? "",
                     ValueText = "--",
@@ -2136,6 +2199,7 @@ private void InitLiveTrend ()
             _liveAllVars.Add (new TrendSelectItem
             {
                 Name = v.VarName,
+                Comments = v.Comments ?? "",
                 Unit = v.Unit ?? "",
                 Color = TrendColors[idx % TrendColors.Length]
             });
@@ -2317,6 +2381,7 @@ private void TickLiveTrend ()
         series.Add (new TrendSeries
         {
             VarName = item.Name,
+            Comments = item.Comments,
             Unit = item.Unit,
             Color = item.Color,
             Points = buf,
@@ -2346,6 +2411,7 @@ private void TickLiveTrend ()
         readings.Add (new CursorReadout
         {
             Label = item.Name,
+            Comments = item.Comments,
             Value = (v.HasValue ? FormatValue (v.Value, FindVarConfig (item.Name)?.VarType ?? "") : "--") + unit,
             Color = item.Color
         });
@@ -2373,6 +2439,7 @@ private void OnLiveCursorMoved (DateTime? time)
         list.Add (new CursorReadout
         {
             Label = r.VarName,
+            Comments = CommentsOf (r.VarName),
             Value = r.ValueText + unit,
             Color = r.Color
         });
@@ -3014,6 +3081,7 @@ private void RefreshActiveAlarms ()
         rows.Add (new ActiveAlarmRow
         {
             VarName = a.VarName,
+            Comments = CommentsOf (a.VarName),
             DirectionText = a.DirectionText,
             ValueText = double.IsNaN (a.Value) ? "--" : a.Value.ToString ("G6"),
             ThresholdText = "阈值 " + a.Threshold.ToString ("G6"),
@@ -3059,6 +3127,7 @@ private void RefreshAlarmHistory ()
                 Id = r.Id,
                 TimeText = r.At.ToString ("MM-dd HH:mm:ss"),
                 VarName = r.VarName,
+                Comments = CommentsOf (r.VarName),
                 TypeText = r.TypeText,
                 DirectionText = r.DirectionText,
                 ValueText = r.Value.ToString ("G6"),
@@ -3210,7 +3279,9 @@ private void TickAlarmPage ()
             }
 
             var valText = double.IsNaN (a.Value) ? "--" : a.Value.ToString ("F2");
-            parts.Add (a.VarName + " " + a.DirectionText + "报警(" + durText
+
+            // 底部报警栏是**所有页面常驻**的,只写 LQB1_Fre_Set 等于让人去背变量表
+            parts.Add (NameWithComment (a.VarName, CommentsOf (a.VarName)) + " " + a.DirectionText + "报警(" + durText
                 + "当前 " + valText + ", 阈值 " + a.Threshold.ToString ("F2") + ")");
         }
 

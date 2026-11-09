@@ -12,6 +12,10 @@ namespace KyjScada.App;
 public sealed class TrendSeries
 {
     public string VarName { get; set; } = "";
+
+    /// <summary>变量中文描述。图例/面板标题上要跟着变量名显示,否则满屏英文缩写看不懂。</summary>
+    public string Comments { get; set; } = "";
+
     public string Unit { get; set; } = "";
     public Color Color { get; set; }
 
@@ -105,6 +109,9 @@ public sealed class TrendChartControl : FrameworkElement
     private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(0x6C, 0x70, 0x86));
     private static readonly Brush CursorBrush = new SolidColorBrush(Color.FromRgb(0xF9, 0xE2, 0xAF));
     private static readonly Brush BandBrush = new SolidColorBrush(Color.FromArgb(0x22, 0x89, 0xB4, 0xFA));
+
+    /// <summary>备注文字用暗一档的灰色:跟着变量名走,但不能抢变量名的辨识度。</summary>
+    private static readonly Brush NoteBrush = new SolidColorBrush(Color.FromRgb(0x8C, 0x93, 0xAB));
 
     // ---- 数据 ----
     private readonly List<TrendSeries> _series = new();
@@ -962,7 +969,8 @@ public sealed class TrendChartControl : FrameworkElement
         brush.Freeze();
 
         var unit = string.IsNullOrEmpty(s.Unit) ? "" : " " + s.Unit;
-        var text = s.VarName + unit + "   [" + min.ToString("G5") + " ~ " + max.ToString("G5") + "]";
+        var note = string.IsNullOrWhiteSpace(s.Comments) ? "" : "  " + s.Comments;
+        var text = s.VarName + note + unit + "   [" + min.ToString("G5") + " ~ " + max.ToString("G5") + "]";
 
         var ft = MakeText(text, 11, brush);
 
@@ -1511,6 +1519,13 @@ public sealed class TrendChartControl : FrameworkElement
 
             var ft = MakeText(s.VarName, 11, brush);
             dc.DrawText(ft, new Point(x + 14, y));
+
+            // 备注跟在变量名后面:操作员认的是"冷却泵1频率给定",不是 LQB1_Fre_Set
+            if (!string.IsNullOrWhiteSpace(s.Comments))
+            {
+                var note = MakeText(s.Comments, 10, NoteBrush);
+                dc.DrawText(note, new Point(x + 18 + ft.Width, y + 1));
+            }
 
             y += 16;
         }

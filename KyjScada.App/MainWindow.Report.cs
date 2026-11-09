@@ -14,6 +14,10 @@ public sealed class ReportRow
 {
     public string TimeText { get; set; } = "";
     public string VarName { get; set; } = "";
+
+    /// <summary>变量中文描述(报表里只写 LQB1_Fre_Set 无法交班、无法核对)。</summary>
+    public string Comments { get; set; } = "";
+
     public string Unit { get; set; } = "";
     public string MinText { get; set; } = "";
     public string MaxText { get; set; } = "";
@@ -247,6 +251,7 @@ public partial class MainWindow
                         ? b.Time.ToString ("yyyy-MM-dd", CultureInfo.InvariantCulture)
                         : b.Time.ToString ("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture),
                     VarName = varName,
+                    Comments = CommentsOf (varName),
                     Unit = unit ?? "",
                     MinText = b.Min.ToString ("G6", CultureInfo.InvariantCulture),
                     MaxText = b.Max.ToString ("G6", CultureInfo.InvariantCulture),

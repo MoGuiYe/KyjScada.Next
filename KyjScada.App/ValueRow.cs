@@ -21,6 +21,14 @@ public sealed class ValueRow : INotifyPropertyChanged
 
     public string Name { get; set; } = "";
 
+    /// <summary>
+    /// 组态里的中文描述。
+    ///
+    /// 现场变量名几乎全是英文缩写(LQB1_Fre_Set、KYJ1In_Open),操作员不可能背下来;
+    /// 只显示变量名的表等于"看得见但不认识"。所以凡出现变量名的地方都要带备注。
+    /// </summary>
+    public string Comments { get; set; } = "";
+
     /// <summary>原始类型(Bool/Byte/Short/Int/Float/Double...)。决定显示格式。</summary>
     public string VarType { get; set; } = "";
 

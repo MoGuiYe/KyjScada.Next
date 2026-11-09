@@ -48,8 +48,11 @@ public partial class MainWindow
             }
         }
 
+        /// <summary>"变量名(备注)" —— 下拉框和结果文字都用它,免得只看到英文缩写。</summary>
+        public string Display => string.IsNullOrWhiteSpace (Comments) ? VarName : VarName + "(" + Comments + ")";
+
         /// <summary>下拉框没走模板时的兜底显示(SetValue/读屏都依赖它)。</summary>
-        public override string ToString() => VarName;
+        public override string ToString() => Display;
     }
 
     private readonly List<JogRow> _jogRows = new();
@@ -91,7 +94,8 @@ public partial class MainWindow
         JogGrid.ItemsSource = _jogRows;
 
         JogVarBox.ItemsSource = null;
-        JogVarBox.DisplayMemberPath = "VarName";
+        // 下拉里显示"变量名(备注)":52 个点全是 LQB1_xxx 这种缩写,只列名字选不准
+        JogVarBox.DisplayMemberPath = "Display";
         JogVarBox.ItemsSource = _jogRows;
         if (_jogRows.Count > 0) JogVarBox.SelectedIndex = 0;
 
@@ -219,6 +223,10 @@ public partial class MainWindow
 
     // ==================== 事件 ====================
 
+    /// <summary>"变量名(备注)"。结果文字里用,现场看的是备注不是缩写。</summary>
+    private static string Label (JogRow row) =>
+        string.IsNullOrWhiteSpace (row.Comments) ? row.VarName : row.VarName + "(" + row.Comments + ")";
+
     /// <summary>选中的目标变量(没有则返回 null)。</summary>
     private JogRow? SelectedJogRow()
     {
@@ -258,7 +266,9 @@ public partial class MainWindow
             return;
         }
 
-        var preview = string.Join(", ", targets.Take(6).Select(t => t.VarName));
+        // 预览里必须带备注:急停是一次性写一片点,只列英文缩写没法确认写的是不是这批
+        var preview = string.Join(", ", targets.Take(6).Select(t =>
+            string.IsNullOrWhiteSpace(t.Comments) ? t.VarName : t.VarName + "(" + t.Comments + ")"));
         if (targets.Count > 6) preview += " 等 " + targets.Count + " 个";
 
         var answer = MessageBox.Show(
@@ -348,7 +358,7 @@ public partial class MainWindow
 
         if (!row.IsBool)
         {
-            JogResultText.Text = "✘ " + row.VarName + " 是 " + row.VarType + " 类型,点动只支持 Bool。数值写入请到「参数设置」页。";
+            JogResultText.Text = "✘ " + Label (row) + " 是 " + row.VarType + " 类型,点动只支持 Bool。数值写入请到「参数设置」页。";
             return;
         }
 
@@ -365,7 +375,7 @@ public partial class MainWindow
         {
             var r = await Task.Run(() => gate.Write(name, value, "jog")).ConfigureAwait(true);
 
-            JogResultText.Text = (r.Success ? "✔ " : "✘ ") + name + " " + action + ": " + r.Message;
+            JogResultText.Text = (r.Success ? "✔ " : "✘ ") + Label(row) + " " + action + ": " + r.Message;
         }
         catch (Exception ex)
         {

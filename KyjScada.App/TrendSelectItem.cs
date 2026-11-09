@@ -7,6 +7,9 @@ public sealed class TrendSelectItem
 {
     public string Name { get; set; } = "";
 
+    /// <summary>组态里的中文描述。选变量时光看英文缩写根本分不清是"频率给定"还是"频率高限"。</summary>
+    public string Comments { get; set; } = "";
+
     /// <summary>曲线颜色。选中后画图用同一个颜色。</summary>
     public Color Color { get; set; }
 
@@ -18,6 +21,10 @@ public sealed class TrendSelectItem
 public sealed class CursorReadout
 {
     public string Label { get; set; } = "";
+
+    /// <summary>变量备注。读数面板上要跟着变量名一起显示,否则看不出是哪个量。</summary>
+    public string Comments { get; set; } = "";
+
     public string Value { get; set; } = "";
     public Color Color { get; set; }
 }

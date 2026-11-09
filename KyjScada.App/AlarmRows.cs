@@ -4,6 +4,10 @@ namespace KyjScada.App;
 public sealed class ActiveAlarmRow
 {
     public string VarName { get; set; } = "";
+
+    /// <summary>变量中文描述。报警只报 "LQB1_Fre_Set 超限" 时,值班的人得先猜那是哪个量。</summary>
+    public string Comments { get; set; } = "";
+
     public string DirectionText { get; set; } = "";
     public string ValueText { get; set; } = "";
     public string ThresholdText { get; set; } = "";
@@ -19,6 +23,10 @@ public sealed class AlarmHistoryRow
 
     public string TimeText { get; set; } = "";
     public string VarName { get; set; } = "";
+
+    /// <summary>变量中文描述(回查组态;查不到时为空,不影响其它列)。</summary>
+    public string Comments { get; set; } = "";
+
     public string TypeText { get; set; } = "";
     public string DirectionText { get; set; } = "";
     public string ValueText { get; set; } = "";

@@ -86,7 +86,8 @@
                           RowBackground="#1E1E2E" AlternatingRowBackground="#181825" Foreground="#FFFFFF"
                           BorderThickness="0">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="变量" Binding="{Binding Name}" Width="220"/>
+                        <DataGridTextColumn Header="变量" Binding="{Binding Name}" Width="200"/>
+                        <DataGridTextColumn Header="备注" Binding="{Binding Comments}" Width="220"/>
                         <DataGridTextColumn Header="值" Binding="{Binding ValueText}" Width="140"/>
                         <DataGridTextColumn Header="单位" Binding="{Binding Unit}" Width="80"/>
                         <DataGridTextColumn Header="质量" Binding="{Binding QualityText}" Width="100"/>
@@ -138,7 +139,13 @@
                                                     <SolidColorBrush Color="{Binding Color}"/>
                                                 </Rectangle.Fill>
                                             </Rectangle>
-                                            <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                                <TextBlock Text="{Binding Comments}" FontSize="11"
+                                                           Foreground="#8C93AB" Margin="8,0,0,0"
+                                                           VerticalAlignment="Center"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
@@ -358,6 +365,8 @@
                                                         </Rectangle.Fill>
                                                     </Rectangle>
                                                     <TextBlock Text="{Binding Label}" Foreground="#C6CDE0" FontSize="11"/>
+                                                    <TextBlock Text="{Binding Comments}" Foreground="#8C93AB"
+                                                               FontSize="11" Margin="4,0,0,0"/>
                                                     <TextBlock Text="{Binding Value}" Foreground="#FFFFFF"
                                                                FontSize="11" FontWeight="Bold" Margin="5,0,0,0"/>
                                                 </StackPanel>
@@ -514,6 +523,9 @@
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="{Binding VarName}" Width="150" FontSize="11"
                                                        Foreground="#FCA5A5"/>
+                                            <TextBlock Text="{Binding Comments}" Width="150" FontSize="11"
+                                                       Foreground="#8C93AB" TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding Comments}"/>
                                             <TextBlock Text="{Binding DirectionText}" Width="50" FontSize="11"
                                                        Foreground="#C6CDE0"/>
                                             <TextBlock Text="{Binding ValueText}" Width="90" FontSize="11"
@@ -553,7 +565,8 @@
                                       BorderThickness="0" FontSize="12">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="时间" Binding="{Binding TimeText}" Width="150"/>
-                                    <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
+                                    <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="170"/>
+                                    <DataGridTextColumn Header="备注" Binding="{Binding Comments}" Width="200"/>
                                     <DataGridTextColumn Header="类型" Binding="{Binding TypeText}" Width="70"/>
                                     <DataGridTextColumn Header="方向" Binding="{Binding DirectionText}" Width="70"/>
                                     <DataGridTextColumn Header="值" Binding="{Binding ValueText}" Width="110"/>
@@ -611,7 +624,13 @@
                                                     <SolidColorBrush Color="{Binding Color}"/>
                                                 </Rectangle.Fill>
                                             </Rectangle>
-                                            <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding Name}" FontSize="12"/>
+                                                <TextBlock Text="{Binding Comments}" FontSize="11"
+                                                           Foreground="#8C93AB" Margin="8,0,0,0"
+                                                           VerticalAlignment="Center"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
@@ -705,6 +724,8 @@
                                                         </Rectangle.Fill>
                                                     </Rectangle>
                                                     <TextBlock Text="{Binding Label}" Foreground="#C6CDE0" FontSize="11"/>
+                                                    <TextBlock Text="{Binding Comments}" Foreground="#8C93AB"
+                                                               FontSize="11" Margin="4,0,0,0"/>
                                                     <TextBlock Text="{Binding Value}" Foreground="#FFFFFF"
                                                                FontSize="11" FontWeight="Bold" Margin="5,0,0,0"/>
                                                 </StackPanel>
@@ -970,7 +991,8 @@
                                   BorderThickness="0" FontSize="12">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="时间" Binding="{Binding TimeText}" Width="180"/>
-                                <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="180"/>
+                                <DataGridTextColumn Header="变量" Binding="{Binding VarName}" Width="170"/>
+                                <DataGridTextColumn Header="备注" Binding="{Binding Comments}" Width="200"/>
                                 <DataGridTextColumn Header="最小" Binding="{Binding MinText}" Width="110"/>
                                 <DataGridTextColumn Header="最大" Binding="{Binding MaxText}" Width="110"/>
                                 <DataGridTextColumn Header="平均" Binding="{Binding AvgText}" Width="110"/>
