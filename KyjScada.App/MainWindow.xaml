@@ -4,6 +4,10 @@
         xmlns:local="clr-namespace:KyjScada.App"
         Title="KyjScada 实时监控" Height="720" Width="1280"
         WindowState="Maximized" MinWidth="1024" MinHeight="640">
+    <Window.Resources>
+        <!-- Bool 行显示开关按钮、数值行显示输入框,靠这个转换器切显示 -->
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -54,7 +58,8 @@
                                MaxWidth="260" TextTrimming="CharacterEllipsis"
                                ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
                     <TextBlock Text="字节序:" Foreground="#C6CDE0" Margin="12,0,4,0" VerticalAlignment="Center" FontSize="13"/>
-                    <ComboBox x:Name="OrderBox" Width="80" VerticalAlignment="Center" SelectionChanged="OnOrderChanged">
+                    <ComboBox x:Name="OrderBox" Width="80"
+        AutomationProperties.Name="字节序" VerticalAlignment="Center" SelectionChanged="OnOrderChanged">
                         <ComboBoxItem Content="ABCD"/>
                         <ComboBoxItem Content="BADC"/>
                         <ComboBoxItem Content="CDAB"/>
@@ -62,7 +67,8 @@
                     </ComboBox>
 
                     <TextBlock Text="设备:" Foreground="#C6CDE0" Margin="14,0,4,0" VerticalAlignment="Center" FontSize="13"/>
-                    <ComboBox x:Name="DeviceBox" Width="190" VerticalAlignment="Center"
+                    <ComboBox x:Name="DeviceBox" Width="190"
+        AutomationProperties.Name="选择设备" VerticalAlignment="Center"
                               SelectionChanged="OnDeviceChanged"
                               ToolTip="切换要监控的设备;协议由设备配置决定"/>
                 </StackPanel>
@@ -112,7 +118,8 @@
                             <TextBlock Grid.Row="0" Text="位号选择" Foreground="#FFFFFF"
                                        FontSize="13" FontWeight="Bold" Margin="10,10,10,6"/>
 
-                            <TextBox Grid.Row="1" x:Name="TrendSearchBox" Margin="10,0,10,8"
+                            <TextBox Grid.Row="1" x:Name="TrendSearchBox"
+                             AutomationProperties.Name="历史趋势变量搜索" Margin="10,0,10,8"
                                      Background="#181825" Foreground="#FFFFFF" BorderBrush="#45475A"
                                      BorderThickness="1" Padding="4,3"
                                      TextChanged="OnTrendSearchChanged" ToolTip="搜索变量名"/>
@@ -154,9 +161,11 @@
                                 <TextBlock Text="分析模板" Foreground="#FFFFFF" FontSize="12"
                                            FontWeight="Bold" Margin="0,0,0,4"/>
                                 <ComboBox x:Name="TrendTemplateBox" Height="24"
+        AutomationProperties.Name="趋势模板"
                                           HorizontalAlignment="Stretch"
                                           SelectionChanged="OnTrendTemplateSelected"/>
-                                <TextBox x:Name="TrendTemplateName" Height="24" Margin="0,6,0,0"
+                                <TextBox x:Name="TrendTemplateName"
+                                  AutomationProperties.Name="趋势模板名称" Height="24" Margin="0,6,0,0"
                                          Background="#181825" Foreground="#FFFFFF"
                                          BorderBrush="#45475A" BorderThickness="1" Padding="4,3"
                                          ToolTip="模板名称"/>
@@ -187,7 +196,8 @@
                             <!-- 用 WrapPanel:控件多,窄窗口下自动换行,否则右侧按钮会被挤出去看不见 -->
                             <WrapPanel Orientation="Horizontal">
                                 <TextBlock Text="范围:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="13"/>
-                                <ComboBox x:Name="TrendRangeBox" Width="130" Margin="6,0,0,0" VerticalAlignment="Center"
+                                <ComboBox x:Name="TrendRangeBox" Width="130"
+        AutomationProperties.Name="历史趋势时间范围" Margin="6,0,0,0" VerticalAlignment="Center"
                                           SelectionChanged="OnTrendRangeChanged">
                                     <ComboBoxItem Content="最近 10 分钟"/>
                                     <ComboBoxItem Content="最近 1 小时"/>
@@ -203,7 +213,8 @@
                                 </ComboBox>
 
                                 <TextBlock Text="分辨率:" Foreground="#C6CDE0" Margin="14,0,4,0" VerticalAlignment="Center" FontSize="13"/>
-                                <ComboBox x:Name="TrendResBox" Width="96" VerticalAlignment="Center"
+                                <ComboBox x:Name="TrendResBox" Width="96"
+        AutomationProperties.Name="历史趋势分辨率" VerticalAlignment="Center"
                                           SelectionChanged="OnTrendResChanged">
                                     <ComboBoxItem Content="自动"/>
                                     <ComboBoxItem Content="原始值"/>
@@ -218,7 +229,8 @@
                                 </ComboBox>
 
                                 <TextBlock Text="聚合:" Foreground="#C6CDE0" Margin="14,0,4,0" VerticalAlignment="Center" FontSize="13"/>
-                                <ComboBox x:Name="TrendAggBox" Width="86" VerticalAlignment="Center"
+                                <ComboBox x:Name="TrendAggBox" Width="86"
+        AutomationProperties.Name="历史趋势聚合方式" VerticalAlignment="Center"
                                           SelectionChanged="OnTrendAggChanged">
                                     <ComboBoxItem Content="平均值"/>
                                     <ComboBoxItem Content="最小值"/>
@@ -304,7 +316,8 @@
                                           VerticalAlignment="Center" IsChecked="True"
                                           Checked="OnShowEventsChanged" Unchecked="OnShowEventsChanged"/>
 
-                                <ComboBox x:Name="TrendModeBox" Width="78" Margin="12,0,0,0"
+                                <ComboBox x:Name="TrendModeBox" Width="78"
+        AutomationProperties.Name="趋势显示模式" Margin="12,0,0,0"
                                           VerticalAlignment="Center"
                                           SelectionChanged="OnTrendModeChanged">
                                     <ComboBoxItem Content="叠加"/>
@@ -318,7 +331,9 @@
 
                         <!-- 曲线控件 -->
                         <Border Grid.Row="1" Margin="10,10,10,4" BorderBrush="#313244" BorderThickness="1">
-                            <local:TrendChartControl x:Name="TrendChart"/>
+                            <local:TrendChartControl x:Name="TrendChart"
+                                    AutomationProperties.Name="历史趋势曲线"
+                                    AutomationProperties.HelpText="二维曲线图,数值读数请用下方的数据表或曲线游标"/>
                         </Border>
 
                         <!-- 光标读数 + 操作提示 -->
@@ -439,7 +454,8 @@
                     <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
                         <WrapPanel Orientation="Horizontal">
                             <TextBlock Text="范围:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="13"/>
-                            <ComboBox x:Name="AlarmRangeBox" Width="120" Margin="6,0,0,0"
+                            <ComboBox x:Name="AlarmRangeBox" Width="120"
+        AutomationProperties.Name="报警时间范围" Margin="6,0,0,0"
                                       VerticalAlignment="Center"
                                       SelectionChanged="OnAlarmRangeChanged">
                                 <ComboBoxItem Content="最近 1 小时"/>
@@ -450,7 +466,8 @@
 
                             <TextBlock Text="变量:" Foreground="#C6CDE0" Margin="14,0,4,0"
                                        VerticalAlignment="Center" FontSize="13"/>
-                            <TextBox x:Name="AlarmSearchBox" Width="140" VerticalAlignment="Center"
+                            <TextBox x:Name="AlarmSearchBox"
+                                     AutomationProperties.Name="报警变量搜索" Width="140" VerticalAlignment="Center"
                                      Background="#181825" Foreground="#FFFFFF" BorderBrush="#45475A"
                                      BorderThickness="1" Padding="4,3"
                                      TextChanged="OnAlarmSearchChanged"/>
@@ -575,7 +592,8 @@
                             <TextBlock Grid.Row="0" Text="位号选择(实时)" Foreground="#FFFFFF"
                                        FontSize="13" FontWeight="Bold" Margin="10,10,10,6"/>
 
-                            <TextBox Grid.Row="1" x:Name="LiveSearchBox" Margin="10,0,10,8"
+                            <TextBox Grid.Row="1" x:Name="LiveSearchBox"
+                             AutomationProperties.Name="实时监控变量搜索" Margin="10,0,10,8"
                                      Background="#181825" Foreground="#FFFFFF" BorderBrush="#45475A"
                                      BorderThickness="1" Padding="4,3"
                                      TextChanged="OnLiveSearchChanged" ToolTip="搜索变量名"/>
@@ -625,7 +643,8 @@
                         <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
                             <WrapPanel Orientation="Horizontal">
                                 <TextBlock Text="窗口:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="13"/>
-                                <ComboBox x:Name="LiveWindowBox" Width="110" Margin="6,0,0,0"
+                                <ComboBox x:Name="LiveWindowBox" Width="110"
+        AutomationProperties.Name="实时趋势窗口长度" Margin="6,0,0,0"
                                           VerticalAlignment="Center"
                                           SelectionChanged="OnLiveWindowChanged">
                                     <ComboBoxItem Content="1 分钟"/>
@@ -648,7 +667,8 @@
 
                                 <Rectangle Width="1" Height="20" Fill="#45475A" Margin="12,0"/>
 
-                                <ComboBox x:Name="LiveModeBox" Width="78" VerticalAlignment="Center"
+                                <ComboBox x:Name="LiveModeBox" Width="78"
+        AutomationProperties.Name="实时趋势显示模式" VerticalAlignment="Center"
                                           SelectionChanged="OnLiveModeChanged">
                                     <ComboBoxItem Content="叠加"/>
                                     <ComboBoxItem Content="分屏"/>
@@ -660,7 +680,9 @@
                         </Border>
 
                         <Border Grid.Row="1" Margin="10,10,10,4" BorderBrush="#313244" BorderThickness="1">
-                            <local:TrendChartControl x:Name="LiveChart"/>
+                            <local:TrendChartControl x:Name="LiveChart"
+                                   AutomationProperties.Name="实时趋势曲线"
+                                   AutomationProperties.HelpText="实时走纸曲线,数值读数请用实时数据表"/>
                         </Border>
 
                         <Border Grid.Row="2" Background="#1E1E2E" Padding="10,6" Margin="10,0,10,10">
@@ -723,18 +745,50 @@
                     </Border>
 
                     <Border Grid.Row="1" Background="#181825" Margin="10,10,10,0">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- 表头:和数据行同一套列宽,后面的备注列才不会被挤歪 -->
+                            <Border Grid.Row="0" Background="#11111B" Padding="8,6" Margin="0,0,0,2">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110"/>
+                                        <ColumnDefinition Width="170"/>
+                                        <ColumnDefinition Width="280"/>
+                                        <ColumnDefinition Width="90"/>
+                                        <ColumnDefinition Width="130"/>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="组" Foreground="#8C93AB" FontSize="11"/>
+                                    <TextBlock Grid.Column="1" Text="变量名" Foreground="#8C93AB" FontSize="11"/>
+                                    <TextBlock Grid.Column="2" Text="备注" Foreground="#8C93AB" FontSize="11"/>
+                                    <TextBlock Grid.Column="3" Text="当前值" Foreground="#8C93AB" FontSize="11"/>
+                                    <TextBlock Grid.Column="4" Text="写入值" Foreground="#8C93AB" FontSize="11"/>
+                                    <TextBlock Grid.Column="5" Text="单位" Foreground="#8C93AB" FontSize="11"/>
+                                    <TextBlock Grid.Column="6" Text="操作" Foreground="#8C93AB" FontSize="11"/>
+                                </Grid>
+                            </Border>
+
+                            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                                          AutomationProperties.Name="可写点列表">
                             <ItemsControl x:Name="WriteList">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Border Background="#1E1E2E" Padding="8,4" Margin="0,0,0,2">
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="120"/>
-                                                    <ColumnDefinition Width="150"/>
                                                     <ColumnDefinition Width="110"/>
-                                                    <ColumnDefinition Width="120"/>
+                                                    <ColumnDefinition Width="170"/>
+                                                    <ColumnDefinition Width="280"/>
                                                     <ColumnDefinition Width="90"/>
+                                                    <ColumnDefinition Width="130"/>
+                                                    <ColumnDefinition Width="60"/>
+                                                    <ColumnDefinition Width="70"/>
                                                     <ColumnDefinition Width="*"/>
                                                 </Grid.ColumnDefinitions>
 
@@ -744,29 +798,58 @@
                                                 <TextBlock Grid.Column="1" Text="{Binding VarName}"
                                                            Foreground="#FFFFFF" FontSize="12"
                                                            FontWeight="Bold" VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding CurrentText}"
+                                                <TextBlock Grid.Column="2" Text="{Binding Comments}"
+                                                           ToolTip="{Binding Comments}"
+                                                           Foreground="#C6CDE0" FontSize="11"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <TextBlock Grid.Column="3" Text="{Binding CurrentText}"
                                                            Foreground="#89B4FA" FontSize="12"
                                                            VerticalAlignment="Center"/>
-                                                <TextBox Grid.Column="3" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                                <!-- 数值点:输入框 + 写入 -->
+                                                <TextBox Grid.Column="4" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                                         AutomationProperties.Name="{Binding Comments, StringFormat=写入值: {0}}"
+                                                         AutomationProperties.HelpText="{Binding VarName, StringFormat=变量名 {0}}"
                                                          Background="#11111B" Foreground="#FFFFFF"
                                                          BorderBrush="#45475A" BorderThickness="1"
                                                          Padding="4,2" FontSize="12"
-                                                         VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="4" Text="{Binding Unit}"
+                                                         VerticalAlignment="Center"
+                                                         Visibility="{Binding IsNumeric, Converter={StaticResource BoolToVisibility}}"/>
+
+                                                <!-- Bool 点:没有"值"可填,只有开/关两态 -->
+                                                <StackPanel Grid.Column="4" Orientation="Horizontal"
+                                                            VerticalAlignment="Center"
+                                                            Visibility="{Binding IsBool, Converter={StaticResource BoolToVisibility}}">
+                                                    <Button Content="写1(开)" Width="62" Height="24" Tag="{Binding}"
+                                                            AutomationProperties.Name="{Binding VarName, StringFormat=写1(开): {0}}"
+                                                            Click="OnWriteBoolOn"
+                                                            Background="#2A3A2A" Foreground="#FFFFFF"
+                                                            BorderBrush="#45475A" BorderThickness="1"/>
+                                                    <Button Content="写0(关)" Width="62" Height="24" Margin="6,0,0,0" Tag="{Binding}"
+                                                            AutomationProperties.Name="{Binding VarName, StringFormat=写0(关): {0}}"
+                                                            Click="OnWriteBoolOff"
+                                                            Background="#313244" Foreground="#FFFFFF"
+                                                            BorderBrush="#45475A" BorderThickness="1"/>
+                                                </StackPanel>
+
+                                                <TextBlock Grid.Column="5" Text="{Binding Unit}"
                                                            Foreground="#C6CDE0" FontSize="11"
                                                            VerticalAlignment="Center"/>
-                                                <Button Grid.Column="5" Content="写入" Width="60" Height="24"
+                                                <Button Grid.Column="6" Content="写入" Width="60" Height="24"
+                                                        AutomationProperties.Name="{Binding VarName, StringFormat=写入: {0}}"
                                                         HorizontalAlignment="Left"
                                                         Tag="{Binding}"
                                                         Click="OnWriteRow"
                                                         Background="#2A3A2A" Foreground="#FFFFFF"
-                                                        BorderBrush="#45475A" BorderThickness="1"/>
+                                                        BorderBrush="#45475A" BorderThickness="1"
+                                                        Visibility="{Binding IsNumeric, Converter={StaticResource BoolToVisibility}}"/>
                                             </Grid>
                                         </Border>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
                         </ScrollViewer>
+                        </Grid>
                     </Border>
 
                     <Border Grid.Row="2" Background="#1E1E2E" Padding="8" Margin="10,8,10,10">
@@ -789,21 +872,24 @@
                     <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
                         <WrapPanel Orientation="Horizontal">
                             <TextBlock Text="起" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="12"/>
-                            <TextBox x:Name="ReportFromBox" Width="152" Height="24" Margin="4,0,0,0"
+                            <TextBox x:Name="ReportFromBox"
+                             AutomationProperties.Name="报表开始时间" Width="152" Height="24" Margin="4,0,0,0"
                                      VerticalAlignment="Center"
                                      Background="#11111B" Foreground="#FFFFFF"
                                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
 
                             <TextBlock Text="止" Foreground="#C6CDE0" Margin="8,0,4,0"
                                        VerticalAlignment="Center" FontSize="12"/>
-                            <TextBox x:Name="ReportToBox" Width="152" Height="24"
+                            <TextBox x:Name="ReportToBox"
+                             AutomationProperties.Name="报表结束时间" Width="152" Height="24"
                                      VerticalAlignment="Center"
                                      Background="#11111B" Foreground="#FFFFFF"
                                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
 
                             <TextBlock Text="粒度:" Foreground="#C6CDE0" Margin="14,0,4,0"
                                        VerticalAlignment="Center" FontSize="12"/>
-                            <ComboBox x:Name="ReportGrainBox" Width="90" VerticalAlignment="Center">
+                            <ComboBox x:Name="ReportGrainBox" Width="90"
+        AutomationProperties.Name="报表统计粒度" VerticalAlignment="Center">
                                 <ComboBoxItem Content="按小时"/>
                                 <ComboBoxItem Content="按天"/>
                                 <ComboBoxItem Content="按班(8h)"/>
@@ -828,7 +914,8 @@
 
                             <TextBlock Text="模板:" Foreground="#C6CDE0" VerticalAlignment="Center"
                                        Margin="12,0,0,0" FontSize="12"/>
-                            <ComboBox x:Name="ReportTemplateBox" Width="120" Height="24"
+                            <ComboBox x:Name="ReportTemplateBox" Width="120"
+        AutomationProperties.Name="报表模板" Height="24"
                                       Margin="6,0,0,0" VerticalAlignment="Center"
                                       Background="#11111B" Foreground="#FFFFFF"
                                       SelectedIndex="0">
@@ -935,7 +1022,8 @@
                                 <Button x:Name="JogOffBtn" Content="点动关" Width="96" Height="40" FontSize="15" Margin="10,0,0,0" Click="OnJogOff"
                                         Background="#313244" Foreground="#FFFFFF" BorderBrush="#45475A" BorderThickness="1"/>
                                 <TextBlock Text="目标变量:" Foreground="#C6CDE0" Margin="20,0,6,0" VerticalAlignment="Center" FontSize="12"/>
-                                <ComboBox x:Name="JogVarBox" Width="220" Height="28" Background="#11111B" Foreground="#FFFFFF"
+                                <ComboBox x:Name="JogVarBox" Width="220"
+        AutomationProperties.Name="点动目标变量" Height="28" Background="#11111B" Foreground="#FFFFFF"
                                           BorderBrush="#45475A">
                                     <!-- 下拉弹层用的是系统默认白底,绝不能让它继承浅色字:
                                          深色主题下浅色字 + 白底 = 用户完全看不见选项。
@@ -960,6 +1048,7 @@
                     </Border>
 
                     <DataGrid Grid.Row="3" x:Name="JogGrid"
+                              AutomationProperties.Name="点动候选点列表"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                               Background="#181825" RowBackground="#1E1E2E"

@@ -14,7 +14,8 @@
         <Border Grid.Row="0" Background="#1E1E2E" Padding="10">
             <WrapPanel Orientation="Horizontal">
                 <TextBlock Text="配置文件:" Foreground="#C6CDE0" VerticalAlignment="Center" FontSize="12"/>
-                <ComboBox x:Name="FileBox" Width="200" Margin="6,0,16,0" VerticalAlignment="Center"
+                <ComboBox x:Name="FileBox"
+        AutomationProperties.Name="配置文件选择" Width="200" Margin="6,0,16,0" VerticalAlignment="Center"
                           SelectionChanged="OnFileChanged"/>
 
                 <Button Content="保存" Width="66" Height="26" Click="OnSave"

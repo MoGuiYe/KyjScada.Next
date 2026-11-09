@@ -2676,8 +2676,11 @@ private void BuildWritePage ()
                     GroupName = g.GroupName,
                     VarName = v.VarName,
                     Unit = v.Unit ?? "",
+                    Comments = v.Comments ?? "",
                     CurrentText = "--",
-                    InputText = ""
+                    InputText = "",
+                    // Bool 行用开关按钮,不给数字输入框
+                    IsBool = string.Equals ((v.VarType ?? "").Trim (), "bool", StringComparison.OrdinalIgnoreCase)
                 });
             }
         }
@@ -2782,6 +2785,115 @@ private void OnWriteEnableChanged (object sender, RoutedEventArgs e)
     SetGateEnabled (wantOn);
 }
 
+/// <summary>Bool 行:写 1(开)。和点动页同一套语义,只是从参数设置页发起。</summary>
+private void OnWriteBoolOn (object sender, RoutedEventArgs e) => WriteBoolRow (sender, true);
+
+/// <summary>Bool 行:写 0(关)。</summary>
+private void OnWriteBoolOff (object sender, RoutedEventArgs e) => WriteBoolRow (sender, false);
+
+/// <summary>
+/// Bool 行的公共写入:1/0 两态,不需要用户填数字。
+///
+/// 这里**不做二次确认**:参数设置页本来就有"允许写入"总闸门 + 权限校验,
+/// 而且开关量是现场最常点的操作,每点一次弹一个确认框会让操作员直接放弃使用。
+/// 危险动作(急停/强制写)才需要确认。
+/// </summary>
+private async void WriteBoolRow (object sender, bool on)
+{
+    if (_gate is null) return;
+
+    if (sender is not Button btn || btn.Tag is not WriteRow row) return;
+
+    btn.IsEnabled = false;
+    WriteResultText.Text = "正在写入「" + row.VarName + "」…";
+
+    var gate = _gate;
+    var name = row.VarName;
+
+    WriteOutcome result;
+
+    try
+    {
+        // 与点动一致:Bool 就是 1.0 / 0.0,中间不存在别的取值
+        result = await Task.Run (() => gate.Write (name, on ? 1.0 : 0.0, "hmi")).ConfigureAwait (true);
+    }
+    catch (Exception ex)
+    {
+        btn.IsEnabled = true;
+
+        WriteResultText.Text = "✘ " + name + " 写入异常: " + ex.Message;
+
+        return;
+    }
+
+    btn.IsEnabled = true;
+
+    WriteResultText.Text = (result.Success ? "✔ " : "✘ ") + name + (on ? " 写1(开): " : " 写0(关): ") + result.Message;
+}
+
+/// <summary>
+    /// 写入前的差异确认。返回 true = 继续下发。判定口径在 <see cref="KyjScada.Runtime.WriteGuard"/>。
+    /// </summary>
+    private bool ConfirmWriteDifference (WriteRow row, double value)
+    {
+        var current = CurrentValueOf (row.VarName);
+
+        var cfg = FindVariableConfig (row.VarName);
+
+        var check = KyjScada.Runtime.WriteGuard.Evaluate (
+            value,
+            current,
+            cfg?.HighAlarmEnable == true,
+            cfg?.HighAlarmValue ?? 0,
+            cfg?.LowAlarmEnable == true,
+            cfg?.LowAlarmValue ?? 0,
+            row.Unit);
+
+        if (!check.NeedsConfirm) return true;
+
+        var answer = MessageBox.Show (
+            KyjScada.Runtime.WriteGuard.Describe (row.VarName, row.GroupName, value, current, check),
+            check.OutOfRange ? "写入确认(超出组态范围)" : "写入确认",
+            MessageBoxButton.YesNo,
+            check.OutOfRange ? MessageBoxImage.Warning : MessageBoxImage.Question);
+
+        return answer == MessageBoxResult.Yes;
+    }
+
+/// <summary>当前实测值(取不到返回 null)。</summary>
+private double? CurrentValueOf (string varName)
+{
+    try
+    {
+        var tv = _bus?.GetSnapshot ()[varName];
+
+        return tv?.AsDouble ();
+    }
+    catch
+    {
+        // 总线还没建立/变量不在本设备里:当成"没有当前值",不影响写入
+        return null;
+    }
+}
+
+/// <summary>按变量名找组态定义(找不到返回 null)。</summary>
+private VariableConfig? FindVariableConfig (string varName)
+{
+    if (_device?.GroupList is null) return null;
+
+    foreach (var g in _device.GroupList)
+    {
+        if (g.VarList is null) continue;
+
+        foreach (var v in g.VarList)
+        {
+            if (string.Equals (v.VarName, varName, StringComparison.OrdinalIgnoreCase)) return v;
+        }
+    }
+
+    return null;
+}
+
 /// <summary>点某一行的「写入」。</summary>
 private async void OnWriteRow (object sender, RoutedEventArgs e)
 {
@@ -2795,6 +2907,11 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
 
         return;
     }
+
+    // 写入前先做一次差异校验:值与当前实测不一致、或超出组态上下限时要确认。
+    // 现场的误写入绝大多数是"手滑多打一位"或"填到了别的量程",
+    // 直接下发轻则设备跳变,重则执行机构动作 —— 这一步就是拦截它。
+    if (!ConfirmWriteDifference (row, value)) return;
 
     // 写值要走一次"连接+发帧+等回帧",断线时这里可能要等几秒(网线被拔的那种更久)。
     // **绝不能在界面线程上等**:那会把整个窗口冻住,用户看到的就是"卡顿/无响应"。

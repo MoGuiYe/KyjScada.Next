@@ -25,7 +25,8 @@
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="归档周期(秒)" Foreground="#C6CDE0" Width="130"
                        VerticalAlignment="Center" FontSize="12"/>
-            <TextBox x:Name="IntervalBox" Width="120" Height="24"
+            <TextBox x:Name="IntervalBox"
+        AutomationProperties.Name="采集周期(秒)" Width="120" Height="24"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
             <TextBlock Text="越小越细,越费磁盘" Foreground="#8C93AB"
@@ -35,7 +36,8 @@
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="历史保留(天)" Foreground="#C6CDE0" Width="130"
                        VerticalAlignment="Center" FontSize="12"/>
-            <TextBox x:Name="RetentionBox" Width="120" Height="24"
+            <TextBox x:Name="RetentionBox"
+        AutomationProperties.Name="历史保留天数" Width="120" Height="24"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
             <TextBlock Text="0 = 永久保留" Foreground="#8C93AB"
@@ -45,7 +47,8 @@
         <StackPanel Grid.Row="3" Orientation="Horizontal">
             <TextBlock Text="写入最小间隔(ms)" Foreground="#C6CDE0" Width="130"
                        VerticalAlignment="Center" FontSize="12"/>
-            <TextBox x:Name="WriteIntervalBox" Width="120" Height="24"
+            <TextBox x:Name="WriteIntervalBox"
+        AutomationProperties.Name="写入最小间隔(毫秒)" Width="120" Height="24"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
             <TextBlock Text="防连点" Foreground="#8C93AB"
@@ -55,10 +58,12 @@
         <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="班次小时 / 早班起点" Foreground="#C6CDE0" Width="130"
                        VerticalAlignment="Center" FontSize="12"/>
-            <TextBox x:Name="ShiftHoursBox" Width="60" Height="24"
+            <TextBox x:Name="ShiftHoursBox"
+        AutomationProperties.Name="班次时长(小时)" Width="60" Height="24"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
-            <TextBox x:Name="ShiftStartBox" Width="60" Height="24" Margin="8,0,0,0"
+            <TextBox x:Name="ShiftStartBox"
+        AutomationProperties.Name="班次起始时刻" Width="60" Height="24" Margin="8,0,0,0"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
             <TextBlock Text="小时 / 0-23 点" Foreground="#8C93AB"
@@ -68,7 +73,8 @@
         <StackPanel Grid.Row="5" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="默认报警死区" Foreground="#C6CDE0" Width="130"
                        VerticalAlignment="Center" FontSize="12"/>
-            <TextBox x:Name="DeadbandBox" Width="120" Height="24"
+            <TextBox x:Name="DeadbandBox"
+        AutomationProperties.Name="报警死区" Width="120" Height="24"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
             <TextBlock Text="变量没配时用它;0=不启用" Foreground="#8C93AB"
@@ -89,7 +95,8 @@
                           Checked="OnMcpEnabledChanged" Unchecked="OnMcpEnabledChanged"/>
                 <TextBlock Text="端口" Foreground="#C6CDE0" FontSize="12"
                            VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <TextBox x:Name="McpPortBox" Width="90" Height="24"
+                <TextBox x:Name="McpPortBox"
+        AutomationProperties.Name="MCP 监听端口" Width="90" Height="24"
                          Background="#11111B" Foreground="#FFFFFF"
                          BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
                 <TextBlock Text="1024-65535,只监听本机" Foreground="#8C93AB"

@@ -56,7 +56,8 @@
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                             <TextBlock Text="用户名" Foreground="#C6CDE0" Width="70"
                                        VerticalAlignment="Center" FontSize="12"/>
-                            <TextBox x:Name="NameBox" Width="200" Height="24"
+                            <TextBox x:Name="NameBox"
+        AutomationProperties.Name="用户名" Width="200" Height="24"
                                      Background="#11111B" Foreground="#FFFFFF"
                                      BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
                         </StackPanel>
@@ -64,7 +65,8 @@
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                             <TextBlock Text="密码" Foreground="#C6CDE0" Width="70"
                                        VerticalAlignment="Center" FontSize="12"/>
-                            <PasswordBox x:Name="PassBox" Width="200" Height="24"
+                            <PasswordBox x:Name="PassBox"
+        AutomationProperties.Name="密码" Width="200" Height="24"
                                          Background="#11111B" Foreground="#FFFFFF"
                                          BorderBrush="#45475A" BorderThickness="1" Padding="4,2"/>
                         </StackPanel>

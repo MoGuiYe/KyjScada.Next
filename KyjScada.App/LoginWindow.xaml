@@ -21,6 +21,8 @@
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
             <TextBlock Text="用户名" Foreground="#C6CDE0" Width="70" VerticalAlignment="Center" FontSize="13"/>
             <TextBox x:Name="UserBox" Width="240" Height="34" FontSize="13"
+                     AutomationProperties.Name="用户名"
+                     AutomationProperties.AutomationId="UserBox"
                      Background="#11111B" Foreground="#FFFFFF"
                      BorderBrush="#45475A" BorderThickness="1" Padding="8,4"/>
         </StackPanel>
@@ -28,6 +30,8 @@
         <StackPanel Grid.Row="2" Orientation="Horizontal">
             <TextBlock Text="密  码" Foreground="#C6CDE0" Width="70" VerticalAlignment="Center" FontSize="13"/>
             <PasswordBox x:Name="PassBox" Width="240" Height="34" FontSize="13"
+                         AutomationProperties.Name="密码"
+                         AutomationProperties.AutomationId="PassBox"
                          Background="#11111B" Foreground="#FFFFFF"
                          BorderBrush="#45475A" BorderThickness="1" Padding="8,4"/>
         </StackPanel>
