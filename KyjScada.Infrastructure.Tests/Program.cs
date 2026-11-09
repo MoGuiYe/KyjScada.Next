@@ -464,15 +464,18 @@ Run("点动候选:现场配置把「状态值」组标为可写后,52 个 Bool �
                 g.Start, g.VarList.First(x => x.VarName == varName), out _);
     }
 
-    // 现场原始配置里没有任何组写 IsWritable → 只有「设定值」按组名兜底算可写,
-    // 而它 24 个点全是 Float;Bool 全在「状态值」组,所以点动页显示 0 个是对的。
+    // 先在内存里把「状态值」组置为未开放,复现现场默认配置下的结果:
+    // 只有「设定值」按组名兜底算可写,而它 24 个点全是 Float,Bool 就是 0 个。
+    // 这里不依赖盘上配置当前是否已经被授权(现场可能已经勾了),否则用例会随配置漂移。
+    var state = dev.GroupList.First(g => g.GroupName != null && g.GroupName.Contains("状态值"));
+    state.IsWritable = false;
+
     var before = KyjScada.Runtime.JogPoints.Select(dev, CanWriteVar);
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertEq(0, before.Count(p => p.IsBool),
-        "原始配置下可点动的 Bool 点应为 0");
+        "未授权的状态值组:可点动的 Bool 点应为 0");
 
     // 授权「状态值」组(= 编辑器里勾「允许下发写入」)后,52 个 Bool 应全部出现
-    var state = dev.GroupList.First(g => g.GroupName != null && g.GroupName.Contains("状态值"));
     state.IsWritable = true;
 
     var after = KyjScada.Runtime.JogPoints.Select(dev, CanWriteVar);
