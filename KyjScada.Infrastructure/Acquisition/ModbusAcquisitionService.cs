@@ -1,4 +1,4 @@
-using KyjScada.Contracts;
+﻿using KyjScada.Contracts;
 using KyjScada.Domain.Config;
 using KyjScada.Domain.Protocol;
 using KyjScada.Infrastructure.Modbus;
@@ -102,6 +102,13 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
     public string DeviceName => _device.DeviceName;
 
+    /// <summary>
+    /// 单轮采集的时间预算。设备掉线时每个分块读都要等满超时,
+    /// 不给上限的话"一轮"能跑几十秒,期间界面显示的全是旧值。
+    /// 超过预算就把剩下的组标成未采集并发布,让界面尽快反映"没数据"。
+    /// </summary>
+    public TimeSpan CycleBudget { get; set; } = TimeSpan.FromSeconds (4);
+
     public bool IsConnected => _client.IsConnected;
 
     /// <summary>最近一次连接/读取失败原因。成功一次就清空。</summary>
@@ -140,11 +147,51 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
         LastError = null;
 
+        // ==================== 整轮预算 ====================
+        // 设备掉线时每个分块读都要等满超时(2 秒),4 个组就是 8 秒起步,组多/分块多时更久。
+        // 这段时间里一个点都不发布 —— 界面就一直显示断线前的最后一帧,
+        // 操作工以为是实时值(老系统最危险的问题),而状态栏还写着"正常"。
+        //
+        // 这里给整轮设上限:超时就把**剩下的组直接标成未采集并发布**,
+        // 保证界面最多迟钝一个预算周期,而不是无限期显示旧值。
+        var cycleBudgetMs = Math.Max (2000, CycleBudget.TotalMilliseconds);
+        var cycleStart = Environment.TickCount64;
+
+        var aborted = false;
+
         foreach (var group in groups)
         {
             var vars = group.VarList;
             if (vars is null || vars.Count == 0) continue;
+
+            if (Environment.TickCount64 - cycleStart > cycleBudgetMs)
+            {
+                aborted = true;
+
+                break;
+            }
+
             successCount += CollectGroup (group, batch, sampleTime);
+        }
+
+        if (aborted)
+        {
+            // 没轮到的点位必须显式标"未采集":留着不写等于让界面继续显示上一轮的旧值
+            foreach (var group in groups)
+            {
+                var vars = group.VarList;
+                if (vars is null) continue;
+
+                foreach (var v in vars)
+                {
+                    if (string.IsNullOrEmpty (v.VarName)) continue;
+                    if (batch.ContainsKey (v.VarName)) continue;
+
+                    batch[v.VarName] = new TagValue (v.VarName, null, TagQuality.NotCollected, sampleTime);
+                }
+            }
+
+            LastError ??= "本轮通讯超时(超过 " + (cycleBudgetMs / 1000.0).ToString ("0.#") + " 秒),已中断其余组的采集";
         }
 
         // 只有真正读到数据才清掉错误;连上了但一路读失败仍要保留原因

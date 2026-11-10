@@ -24,7 +24,17 @@ public partial class MainWindow : Window
     private DispatcherTimer _acqTimer = null;
     private IAcquisitionService _svc = null;
     private DeviceConfig _device = null;
-    private readonly List<ValueRow> _rows = new List<ValueRow> ();
+    /// <summary>
+    /// 实时监控表格的行。**必须是 ObservableCollection,不能用 List**。
+    ///
+    /// 用 List 时 BuildRows 里 Clear+Add 不通知界面,而紧跟着又把**同一个实例**
+    /// 赋给 ValueGrid.ItemsSource —— WPF 看到引用没变就不重建行容器,
+    /// 表格里留的还是上一批 ValueRow 对象,OnUiTick 更新的是新对象:
+    /// 数据收到了、界面却一动不动(换设备/重连后必现)。
+    /// 换成 ObservableCollection,Clear/Add 自己就会通知。
+    /// </summary>
+    private readonly System.Collections.ObjectModel.ObservableCollection<ValueRow> _rows
+        = new System.Collections.ObjectModel.ObservableCollection<ValueRow> ();
 
     // 采集调度:同一时刻只采下拉框选中的那一台(自己的连接/总线/报警/归档)
     private AcquisitionCoordinator _coordinator = null;
@@ -458,6 +468,15 @@ public partial class MainWindow : Window
     {
         var coord = EnsureCoordinator ();
 
+        // 先把旧的**全部**停掉并释放,再建这一台。
+        //
+        // 为什么不能复用:通讯中断后采集循环可能卡死在一次同步读里(串口句柄失效、
+        // 设备不回帧),此时 IsRunning 仍是 true、State 仍停在"正常",
+        // 复用这条流水线等于**永远不会恢复** —— 现场看到的就是
+        // "重新选了设备,界面还停在上一次的数据上"。
+        // 重选设备对操作员的语义就是"重新建立连接",所以这里一律重建。
+        coord.Build (Array.Empty<DeviceConfig> (), null, dropMissing: true);
+
         coord.Build (new[] { device }, null, dropMissing: true);
 
         var pipeline = coord.Find (device.DeviceName);
@@ -465,6 +484,32 @@ public partial class MainWindow : Window
         pipeline?.Start ();
 
         return pipeline;
+    }
+
+    /// <summary>强制重建当前设备的流水线(卡死看门狗与「重新连接」共用)。</summary>
+    private void RebuildCurrentPipeline (string reason)
+    {
+        if (_device is null) return;
+
+        DiagUi ("pipeline rebuild: " + reason);
+
+        var pipeline = EnsurePipeline (_device);
+
+        _pipeline = pipeline;
+        _svc = pipeline?.Service;
+        _alarm = pipeline?.Alarm;
+        _archive = pipeline?.Archive;
+
+        if (pipeline is not null)
+        {
+            _bus = pipeline.Bus;
+        }
+
+        // 闸门持有的是具体服务实例,重建后必须同步,否则写入还打到旧服务
+        if (_gate is not null) _gate.Writer = _svc as IDeviceWriter;
+
+        _lastRounds = -1;
+        _stuckSince = DateTime.MinValue;
     }
 
     /// <summary>
@@ -2031,6 +2076,48 @@ public partial class MainWindow : Window
 
         if (_pipeline is null) return;
 
+        // ==================== 卡死看门狗 ====================
+        // 采集循环可能卡死在一次同步读里(串口句柄失效、设备不回帧):任务没结束、
+        // IsRunning 仍为 true、State 仍停在"正常",但轮次不再增长、总线不再更新。
+        // 后果就是界面**永远**显示断线前的最后一帧,而且怎么重选设备都没用。
+        // 这里用"轮次是否还在涨"判定,超过 5 个采集周期就强制重建流水线。
+        if (_pipeline.Service is not null && _pipeline.IsRunning)
+        {
+            var busVersion = _bus.Version;
+
+            if (_pipeline.Rounds != _lastRounds || busVersion != _lastBusVersion)
+            {
+                // 轮次或数据任一在动,就说明循环是活的
+                _lastRounds = _pipeline.Rounds;
+                _lastBusVersion = busVersion;
+                _stuckSince = DateTime.MinValue;
+            }
+            else
+            {
+                if (_stuckSince == DateTime.MinValue) _stuckSince = DateTime.Now;
+
+                // 阈值必须大于"设备掉线时跑完一轮"的最坏耗时,否则会把正在正常等超时的
+                // 那一轮砍掉 —— 结果是永远跑不完首轮、界面永远没数据(实测踩过)。
+                // 服务侧有 CycleBudget 兜住单轮耗时,这里只负责救"真的挂了"的线程。
+                var limit = TimeSpan.FromSeconds (
+                    Math.Max (30, _pipeline.Interval.TotalSeconds * 30));
+
+                if (DateTime.Now - _stuckSince > limit
+                    && DateTime.Now - _lastRebuildAt > TimeSpan.FromSeconds (60))
+                {
+                    _lastRebuildAt = DateTime.Now;
+
+                    StatusText.Text = "通讯无响应,正在重连…";
+                    StatusText.Foreground = System.Windows.Media.Brushes.Goldenrod;
+
+                    RebuildCurrentPipeline ("轮次停在 " + _pipeline.Rounds + "、数据版本停在 " + busVersion
+                        + ",已 " + limit.TotalSeconds.ToString ("0") + " 秒没有变化,判定卡死");
+
+                    return;
+                }
+            }
+        }
+
         var state = _pipeline.State;
 
         switch (state)
@@ -2113,6 +2200,12 @@ public partial class MainWindow : Window
     private static readonly bool _diagEnabled =
         Environment.GetCommandLineArgs ().Any (a => a == "--ui-diag")
         || Environment.GetEnvironmentVariable ("KYJ_UI_DIAG") == "1";
+
+    /// <summary>卡死看门狗:最近一次看到的轮次/总线版本,以及"两者都不再变化"的起点。</summary>
+    private int _lastRounds = -1;
+    private long _lastBusVersion = -1;
+    private DateTime _stuckSince = DateTime.MinValue;
+    private DateTime _lastRebuildAt = DateTime.MinValue;
 
     private readonly System.Diagnostics.Stopwatch _uiClock = System.Diagnostics.Stopwatch.StartNew ();
     private long _uiLastMs;
@@ -2225,7 +2318,14 @@ public partial class MainWindow : Window
 
         if (uiGap > 800 || uiBody.ElapsedMilliseconds > 100)
         {
+            var snapNow = _bus.GetSnapshot ();
+            var pipeBus = _pipeline?.Bus;
+
             DiagUi ("uiTick gap=" + uiGap + "ms body=" + uiBody.ElapsedMilliseconds + "ms rows=" + _rows.Count
+                + " snapN=" + snapNow.Values.Count + " busVer=" + _bus.Version
+                + " pipeBusVer=" + (pipeBus?.Version ?? -1)
+                + " sameBus=" + ReferenceEquals (_bus, pipeBus)
+                + " firstRowHit=" + (snapNow[_rows.Count > 0 ? _rows[0].Name : ""] is not null)
                 + " state=" + (_pipeline?.State ?? "-")
                 + " acqCycle=" + (_pipeline?.LastCycleMs ?? 0) + "ms"
                 + " | rows=" + tRows + " grid=" + (tGrid - tRows) + " alarm=" + (tAlarm - tGrid)
@@ -2800,7 +2900,9 @@ private void ApplyWritePermission ()
 
 private CommandGate _gate;
 
-private readonly List<WriteRow> _writeRows = new List<WriteRow> ();
+/// <summary>同上:必须可观察,否则重建写入页后表格仍显示旧行。</summary>
+    private readonly System.Collections.ObjectModel.ObservableCollection<WriteRow> _writeRows
+        = new System.Collections.ObjectModel.ObservableCollection<WriteRow> ();
 
 /// <summary>
 /// 构建参数设置页:把当前设备里**真正可写**的点列出来。

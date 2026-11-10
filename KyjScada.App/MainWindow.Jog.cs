@@ -55,7 +55,8 @@ public partial class MainWindow
         public override string ToString() => Display;
     }
 
-    private readonly List<JogRow> _jogRows = new();
+    /// <summary>同上:必须可观察,否则重建点动页后表格仍显示旧行。</summary>
+    private readonly System.Collections.ObjectModel.ObservableCollection<JogRow> _jogRows = new();
     private bool _jogPageBuilt;
 
     /// <summary>点动按下/松开写的值(整寄存器 Bool:1/0)。</summary>
