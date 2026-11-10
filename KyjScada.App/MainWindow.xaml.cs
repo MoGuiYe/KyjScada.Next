@@ -121,10 +121,8 @@ public partial class MainWindow : Window
 
             if (preferred is not null)
             {
-                _switchingDevice = true;
-                DeviceBox.SelectedIndex = devices.IndexOf (preferred) + 1;   // +1:第 0 项是"未选择"
-                _switchingDevice = false;
-
+                // 这里让 ApplyDevice 重建下拉框(BuildDeviceSelector 会按 _device 恢复选中项)。
+                // 顺序很关键:此时 _device 还是 null,提前建出来的下拉框必然停在"未选择"上。
                 ApplyDevice (preferred);
             }
             else
@@ -251,7 +249,28 @@ public partial class MainWindow : Window
                 + (supported ? "" : "  (未采集)"));
         }
 
+        // 重建会把选中项清成 -1。**必须**按当前设备恢复回去:
+        // 启动流程里是先设 SelectedIndex 再 ApplyDevice,而 ApplyDevice 又会调到这里,
+        // 于是“记住的选择”每次都被自己抹掉 —— 表现为下拉框永远是空的。
+        DeviceBox.SelectedIndex = IndexOfDevice (_device);
+
         _switchingDevice = false;
+    }
+
+    /// <summary>设备在 _deviceList 里的下标;下拉框下标 = 它 + 1(第 0 项是"未选择")。</summary>
+    private int IndexOfDevice (DeviceConfig? device)
+    {
+        if (device is null) return NoDeviceIndex;
+
+        for (var i = 0; i < _deviceList.Count; i++)
+        {
+            if (string.Equals (_deviceList[i].DeviceName, device.DeviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1;
+            }
+        }
+
+        return NoDeviceIndex;
     }
 
     private void OnDeviceChanged (object sender, SelectionChangedEventArgs e)

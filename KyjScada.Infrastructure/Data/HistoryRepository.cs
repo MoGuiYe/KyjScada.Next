@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using KyjScada.Contracts;
 using KyjScada.Domain.History;
 using Microsoft.Data.Sqlite;
@@ -40,7 +40,18 @@ public sealed class HistoryRepository : IHistoryRepository
     private readonly string _dbPath;
     private readonly Dictionary<string, int> _varIdCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _cacheLock = new();
-    private bool _schemaReady;
+
+    /// <summary>建表开关。跨实例共享:同一个库文件在进程内可能被多个仓储实例打开。</summary>
+    private static readonly HashSet<string> SchemaReady = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 建表/改 journal_mode 的串行锁。
+    ///
+    /// 必须按库文件串行:journal_mode 是**库级持久设置**,切换时要求独占锁,
+    /// 两个线程(归档线程 + MCP/报表)同时对一个新库切 WAL,后到的那个会撞锁失败 ——
+    /// 现场表现是"程序刚装好第一次打开数据库时 MCP 报错,重启又好了"。
+    /// </summary>
+    private static readonly object SchemaLock = new();
 
     public HistoryRepository(string dbPath)
     {
@@ -53,15 +64,20 @@ public sealed class HistoryRepository : IHistoryRepository
         {
             DataSource = _dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared
+
+            // 不用 Shared 缓存:SQLite 官方已把它列为不推荐,且与 WAL 组合时
+            // 并发写会直接返回 SQLITE_LOCKED(实测两个线程同时首写就炸)。
+            // 并发靠 WAL + busy_timeout 解决,不靠共享页缓存。
+            Cache = SqliteCacheMode.Private
         };
 
         var conn = new SqliteConnection(builder.ToString());
         conn.Open();
 
-        // WAL 模式:读写并发,写不阻塞读。老库实测就是 WAL。
+        // 每条连接都要的:忙等而不是立刻报错。
+        // 归档线程在写、界面/MCP 同时在读,没这个设置时"库被占用"会直接抛给上层。
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "PRAGMA journal_mode=wal; PRAGMA synchronous=normal;";
+        cmd.CommandText = "PRAGMA busy_timeout=5000; PRAGMA synchronous=normal;";
         cmd.ExecuteNonQuery();
 
         return conn;
@@ -70,18 +86,30 @@ public sealed class HistoryRepository : IHistoryRepository
     /// <summary>建表(幂等)。首次使用时调用。</summary>
     public void EnsureSchema()
     {
-        if (_schemaReady) return;
-
-        using var conn = OpenConnection();
-
-        foreach (var sql in HistorySchema.AllCreateStatements)
+        lock (SchemaLock)
         {
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = sql;
-            cmd.ExecuteNonQuery();
-        }
+            if (SchemaReady.Contains(_dbPath)) return;
 
-        _schemaReady = true;
+            using var conn = OpenConnection();
+
+            // journal_mode 只在建库时切一次(它是库级持久设置),
+            // 不要放进 OpenConnection:每条连接都切等于每次都要抢独占锁。
+            // WAL:读写并发,写不阻塞读。老库实测就是 WAL。
+            using (var pragma = conn.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA journal_mode=wal;";
+                pragma.ExecuteScalar();
+            }
+
+            foreach (var sql in HistorySchema.AllCreateStatements)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+            }
+
+            SchemaReady.Add(_dbPath);
+        }
     }
 
     /// <summary>
