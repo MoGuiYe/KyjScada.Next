@@ -829,8 +829,8 @@
                                                            VerticalAlignment="Center"/>
                                                 <!-- 数值点:输入框 + 写入 -->
                                                 <TextBox Grid.Column="4" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
-                                                         AutomationProperties.Name="{Binding Comments, StringFormat=写入值: {0}}"
-                                                         AutomationProperties.HelpText="{Binding VarName, StringFormat=变量名 {0}}"
+                                                         AutomationProperties.Name="{Binding A11yNameInput}"
+                                                         AutomationProperties.HelpText="{Binding Comments}"
                                                          Background="#11111B" Foreground="#FFFFFF"
                                                          BorderBrush="#45475A" BorderThickness="1"
                                                          Padding="4,2" FontSize="12"
@@ -842,12 +842,12 @@
                                                             VerticalAlignment="Center"
                                                             Visibility="{Binding IsBool, Converter={StaticResource BoolToVisibility}}">
                                                     <Button Content="写1(开)" Width="62" Height="24" Tag="{Binding}"
-                                                            AutomationProperties.Name="{Binding VarName, StringFormat=写1(开): {0}}"
+                                                            AutomationProperties.Name="{Binding A11yNameOn}"
                                                             Click="OnWriteBoolOn"
                                                             Background="#2A3A2A" Foreground="#FFFFFF"
                                                             BorderBrush="#45475A" BorderThickness="1"/>
                                                     <Button Content="写0(关)" Width="62" Height="24" Margin="6,0,0,0" Tag="{Binding}"
-                                                            AutomationProperties.Name="{Binding VarName, StringFormat=写0(关): {0}}"
+                                                            AutomationProperties.Name="{Binding A11yNameOff}"
                                                             Click="OnWriteBoolOff"
                                                             Background="#313244" Foreground="#FFFFFF"
                                                             BorderBrush="#45475A" BorderThickness="1"/>
@@ -857,7 +857,7 @@
                                                            Foreground="#C6CDE0" FontSize="11"
                                                            VerticalAlignment="Center"/>
                                                 <Button Grid.Column="6" Content="写入" Width="60" Height="24"
-                                                        AutomationProperties.Name="{Binding VarName, StringFormat=写入: {0}}"
+                                                        AutomationProperties.Name="{Binding A11yNameWrite}"
                                                         HorizontalAlignment="Left"
                                                         Tag="{Binding}"
                                                         Click="OnWriteRow"

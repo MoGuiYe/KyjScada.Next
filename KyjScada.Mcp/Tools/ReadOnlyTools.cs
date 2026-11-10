@@ -31,10 +31,8 @@ public sealed class ReadOnlyTools
     /// 只回"无法解析组态文件"时,AI 会当成"这台机器没有组态"转头去查别的东西;
     /// 真实原因(文件被占用/JSON 写了一半/空数组)恰恰是排查的唯一线索。
     /// </summary>
-    private string ConfigLoadFailure(string fileName)
+    private static string ConfigLoadFailure(string fileName, string? why)
     {
-        var why = _config.LastError;
-
         return string.IsNullOrWhiteSpace (why)
             ? $"无法解析组态文件: {fileName}"
             : $"无法解析组态文件: {fileName};原因: {why}";
@@ -81,9 +79,8 @@ public sealed class ReadOnlyTools
         var pick = files.FirstOrDefault(f => f.Contains("TCP", StringComparison.OrdinalIgnoreCase) && !f.Contains("Over", StringComparison.OrdinalIgnoreCase))
                    ?? files[0];
 
-        var project = _config.Load(pick);
-        if (project == null)
-            return ConfigLoadFailure(pick);
+        if (!_config.TryLoad(pick, out var project, out var loadError))
+            return ConfigLoadFailure(pick, loadError);
 
         var all = _config.EnumerateVariables(project).ToList();
         var filtered = keyword == null
@@ -301,8 +298,7 @@ public sealed class ReadOnlyTools
         var pick = files.FirstOrDefault(f => f.Contains("TCP", StringComparison.OrdinalIgnoreCase) && !f.Contains("Over", StringComparison.OrdinalIgnoreCase))
                    ?? files[0];
 
-        var project = _config.Load(pick);
-        if (project == null) return null;
+        if (!_config.TryLoad(pick, out var project, out _)) return null;
 
         var v = _config.EnumerateVariables(project)
             .FirstOrDefault(x => x.VarName != null && x.VarName.Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -404,8 +400,7 @@ public sealed class ReadOnlyTools
             var pick = files.FirstOrDefault(f => f.Contains("TCP", StringComparison.OrdinalIgnoreCase) && !f.Contains("Over", StringComparison.OrdinalIgnoreCase))
                        ?? files[0];
 
-            var project = _config.Load(pick);
-            if (project != null)
+            if (_config.TryLoad(pick, out var project, out var loadError) && project != null)
             {
                 sb.AppendLine($"使用组态: {pick}");
                 var vars = _config.EnumerateVariables(project).ToList();
@@ -428,7 +423,7 @@ public sealed class ReadOnlyTools
             {
                 // 读不出来要说清是"文件坏了"还是"文件没有":只说"没组态",
                 // AI 会当成"这台机器没配置",然后去查不存在的数据。
-                sb.AppendLine(ConfigLoadFailure(pick));
+                sb.AppendLine(ConfigLoadFailure(pick, loadError));
             }
         }
 

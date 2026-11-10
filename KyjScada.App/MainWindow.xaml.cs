@@ -535,17 +535,33 @@ public partial class MainWindow : Window
                     return "拒绝:写入未启用。请登录具备「参数设置」权限的账号,并在「参数设置」页勾选「允许写入」。";
                 }
 
+                // 远程写入**不弹确认**(没人在这儿点“是”),所以带 confirmed:false 先问闸门:
+                // 值可疑时它回 NeedsConfirm,这里一律按拒绝处理 ——
+                // 外部 AI 一句 write_variable("X", 5000) 不能绕过任何校验直发 PLC。
                 var outcome = _gate.Write (varName, value, "MCP");
 
                 // 远程写入必须让操作员在界面上看得见:谁写的、写了什么、成没成
-                var line = "MCP 远程写入 " + varName + " = " + value
+                var line = "MCP 远程写入 " + NameWithComment (varName, CommentsOf (varName)) + " = " + value
                     + " → " + (outcome.Success ? "成功" : "失败:" + outcome.Message);
 
                 if (WriteResultText is not null) WriteResultText.Text = line;
 
-                return outcome.Success
-                    ? "OK " + varName + " = " + value + "(" + outcome.Message + ")"
-                    : "拒绝:" + outcome.Message;
+                if (outcome.Success)
+                {
+                    return "OK " + varName + " = " + value + "(" + outcome.Message + ")";
+                }
+
+                if (outcome.Verdict == WriteVerdict.NeedsConfirm)
+                {
+                    var why = outcome.Unverifiable
+                        ? "当前值不可核实"
+                        : outcome.OutOfRange ? "超出写入范围" : "与当前状态不一致";
+
+                    return "拒绝:远程写入需要人工确认(" + why + "),请在「参数设置」页手动写入。"
+                        + "详情:" + outcome.Message;
+                }
+
+                return "拒绝:" + outcome.Message;
             });
         }
         catch (Exception ex)
@@ -2685,11 +2701,24 @@ private void BuildWritePage ()
 {
     _writeRows.Clear ();
 
-    _gate = new CommandGate
-        {
-            Enabled = false,
-            MinInterval = TimeSpan.FromMilliseconds (_appSettings.WriteMinIntervalMs)
-        };
+    // 闸门**只在第一次建**:重建会换掉实例,Enabled 被重置成 false、限速表与审计一起清空,
+    // 而当时可能还有在途写入握着旧实例 —— 关一下配置编辑器(哪怕只看一眼)就变成
+    // “写入被静默关闭 + 审计断电”。换设备/重读配置只更新 Writer 与可写点清单。
+    if (_gate is null)
+    {
+        _gate = new CommandGate
+            {
+                Enabled = false,
+                MinInterval = TimeSpan.FromMilliseconds (_appSettings.WriteMinIntervalMs)
+            };
+    }
+    else
+    {
+        _gate.MinInterval = TimeSpan.FromMilliseconds (_appSettings.WriteMinIntervalMs);
+    }
+
+    // 值判定统一挂在闸门上:所有写入口(界面行/Bool 按钮/点动/急停/MCP)都过它
+    _gate.ValueGuard = EvaluateWrite;
 
     if (_svc is not null) _gate.Writer = _svc as IDeviceWriter;
 
@@ -2898,51 +2927,60 @@ private async void WriteBoolRow (object sender, bool on)
     WriteResultText.Text = (result.Success ? "✔ " : "✘ ") + name + (on ? " 写1(开): " : " 写0(关): ") + result.Message;
 }
 
-/// <summary>
-    /// 写入前的差异确认。返回 true = 继续下发。判定口径在 <see cref="KyjScada.Runtime.WriteGuard"/>。
+    /// <summary>
+    /// 闸门的值判定回调:把“组态 + 当前采样”翻译成 WriteCheck。
+    ///
+    /// 放在这里(而不是各页面)是因为闸门是所有写入口的唯一汇合点:
+    /// 界面数值行、Bool 按钮、点动、急停、MCP 远程写,全都要过 CommandGate.Write。
+    /// 判定口径本身在 Runtime/WriteGuard(纯函数,已单测)。
+    ///
+    /// 注意:这里**不用报警阈值**当写入范围 —— 频率给定 10Hz 低于报警低限 20Hz 是正常操作。
+    /// 写入范围只认组态里的 WriteLowLimit/WriteHighLimit,没配就只做差异确认。
     /// </summary>
-    private bool ConfirmWriteDifference (WriteRow row, double value)
+    private KyjScada.Runtime.WriteCheck EvaluateWrite (string varName, double value)
     {
-        var current = CurrentValueOf (row.VarName);
+        var cfg = FindVariableConfig (varName);
 
-        var cfg = FindVariableConfig (row.VarName);
+        var isBool = cfg is not null
+            && string.Equals ((cfg.VarType ?? "").Trim (), "bool", StringComparison.OrdinalIgnoreCase);
 
-        var check = KyjScada.Runtime.WriteGuard.Evaluate (
-            value,
-            current,
-            cfg?.HighAlarmEnable == true,
-            cfg?.HighAlarmValue ?? 0,
-            cfg?.LowAlarmEnable == true,
-            cfg?.LowAlarmValue ?? 0,
-            row.Unit);
+        var limits = new KyjScada.Runtime.WriteLimits (
+            cfg?.WriteHighLimit,
+            cfg?.WriteLowLimit,
+            cfg?.Unit ?? "",
+            isBool);
 
-        if (!check.NeedsConfirm) return true;
-
-        var answer = MessageBox.Show (
-            KyjScada.Runtime.WriteGuard.Describe (row.VarName, row.GroupName, value, current, check),
-            check.OutOfRange ? "写入确认(超出组态范围)" : "写入确认",
-            MessageBoxButton.YesNo,
-            check.OutOfRange ? MessageBoxImage.Warning : MessageBoxImage.Question);
-
-        return answer == MessageBoxResult.Yes;
+        return KyjScada.Runtime.WriteGuard.Evaluate (value, CurrentSampleOf (varName), limits);
     }
 
-/// <summary>当前实测值(取不到返回 null)。</summary>
-private double? CurrentValueOf (string varName)
-{
-    try
+    /// <summary>
+    /// 当前采样值 + 是否可信。
+    ///
+    /// 只看“有没有值”是不够的:断线时总线里还留着最后一次的值,质量标记已经是 Bad,
+    /// 拿这种值去比较等于用过期数据做安全判断 —— 所以质量不是 Good 一律按不可信处理。
+    /// </summary>
+    private KyjScada.Runtime.CurrentSample CurrentSampleOf (string varName)
     {
-        var tv = _bus?.GetSnapshot ()[varName];
+        try
+        {
+            var tv = _bus?.GetSnapshot ()[varName];
 
-        return tv?.AsDouble ();
-    }
-    catch
-    {
-        // 总线还没建立/变量不在本设备里:当成"没有当前值",不影响写入
-        return null;
-    }
-}
+            if (tv is null) return KyjScada.Runtime.CurrentSample.Unknown;
 
+            if (tv.Quality != TagQuality.Good) return KyjScada.Runtime.CurrentSample.Unknown;
+
+            var d = tv.AsDouble ();
+
+            return d.HasValue
+                ? KyjScada.Runtime.CurrentSample.Of (d.Value)
+                : KyjScada.Runtime.CurrentSample.Unknown;
+        }
+        catch
+        {
+            // 总线还没建立/变量不在本设备里:当成“读不到”,交给 WriteGuard 强制确认
+            return KyjScada.Runtime.CurrentSample.Unknown;
+        }
+    }
 /// <summary>按变量名找组态定义(找不到返回 null)。</summary>
 private VariableConfig? FindVariableConfig (string varName)
 {
@@ -2975,10 +3013,10 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
         return;
     }
 
-    // 写入前先做一次差异校验:值与当前实测不一致、或超出组态上下限时要确认。
-    // 现场的误写入绝大多数是"手滑多打一位"或"填到了别的量程",
-    // 直接下发轻则设备跳变,重则执行机构动作 —— 这一步就是拦截它。
-    if (!ConfirmWriteDifference (row, value)) return;
+    // 值判定在闸门里做(ValueGuard)。这里先“不带确认”地试一次:
+    //   · 返回 NeedsConfirm → 说明值可疑,弹框问人;点了是再用 confirmed:true 重发;
+    //   · 其它失败(未启用/无权限/不可写/限速)→ 直接显示原因。
+    // 顺序很重要:权限与可写性在闸门里**先于**值判定,所以没权限的人不会被弹框骚扰。
 
     // 写值要走一次"连接+发帧+等回帧",断线时这里可能要等几秒(网线被拔的那种更久)。
     // **绝不能在界面线程上等**:那会把整个窗口冻住,用户看到的就是"卡顿/无响应"。
@@ -3005,6 +3043,43 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
 
             return;
         }
+
+    // 闸门说“要确认”:此时**一个字节都没下发**,问过人再用 confirmed 重发
+    if (result.Verdict == WriteVerdict.NeedsConfirm)
+    {
+        var answer = MessageBox.Show (
+            "要写入的值与当前状态不一致,请确认:\n\n"
+            + "变量: " + NameWithComment (name, row.Comments)
+            + (string.IsNullOrEmpty (row.GroupName) ? "" : "  (" + row.GroupName + ")") + "\n"
+            + "输入值: " + value.ToString ("0.######") + "\n\n"
+            + result.Message
+            + "\n\n确认要下发这个值吗?",
+            result.OutOfRange ? "写入确认(超出写入范围)" : "写入确认",
+            MessageBoxButton.YesNo,
+            result.OutOfRange ? MessageBoxImage.Warning : MessageBoxImage.Question);
+
+        if (answer != MessageBoxResult.Yes)
+        {
+            btn.IsEnabled = true;
+
+            WriteResultText.Text = "已取消:" + name + " 未写入";
+
+            return;
+        }
+
+        try
+        {
+            result = await Task.Run (() => gate.Write (name, value, "hmi", null, confirmed: true)).ConfigureAwait (true);
+        }
+        catch (Exception ex)
+        {
+            btn.IsEnabled = true;
+
+            WriteResultText.Text = "✘ " + name + " 写入异常: " + ex.Message;
+
+            return;
+        }
+    }
 
     btn.IsEnabled = true;
 
@@ -3305,11 +3380,21 @@ private void TickAlarmPage ()
 
             var loaded = SettingsJsonCodec.LoadDirectory (dir);
 
+            // 有文件解析失败就**中止重建**:残缺组态会让设备列表整体变样,
+            // 下拉框索引错位之后切设备,写入可能打到另一台 PLC 上。
+            if (loaded.Skipped.Count > 0)
+            {
+                FooterText.Text = "重读配置已中止:" + string.Join ("; ", loaded.Skipped.Take (3))
+                    + " —— 配置有损坏,请修好后再试(界面仍按旧组态运行)。";
+
+                return;
+            }
+
             var devices = loaded.Project.AllDevices ().ToList ();
 
             if (devices.Count == 0)
             {
-                FooterText.Text = "配置编辑器已关闭:重读后没有任何设备,请检查配置文件。";
+                FooterText.Text = "配置编辑器已关闭:重读后没有任何设备,请检查配置文件(界面仍按旧组态运行)。";
 
                 return;
             }
@@ -3323,11 +3408,13 @@ private void TickAlarmPage ()
             _deviceList = devices;
             _deviceFiles = loaded.DeviceFiles;
 
+            // 备注可能被改过:缓存必须清,否则界面还显示旧备注(与写入页/点动页对不上)
+            _commentCache.Clear ();
+
             BuildDeviceSelector ();
 
-            if (fresh is not null && !ReferenceEquals (fresh, _device))
+            if (fresh is not null)
             {
-                // 同名新对象:换上去,但不要重开采集(那是流水线的事,重启才生效)
                 _device = fresh;
 
                 var idx = _deviceList.IndexOf (fresh);
@@ -3340,10 +3427,19 @@ private void TickAlarmPage ()
                 }
             }
 
+            // 采集服务是按组态**编译**进内存的(寄存器映射、可写点、Scale),
+            // 换了组态却继续用旧服务,就会出现“按旧地址发到别的寄存器、还回显写入成功”。
+            // 所以这里重建这一台的流水线,闸门持有的 Writer 随之换新。
+            // 闸门**实例本身保留**:Enabled、限速表、审计记录都不受影响。
+            EnsureCoordinator ().Build (_deviceList);
+
+            RestartService ();
+
+            // 闸门若是第一次建(从没打开过参数设置页),这里补建一次
             BuildWritePage ();
             BuildJogPage ();
 
-            FooterText.Text = "配置已重新读取:写入页/点动页按新组态刷新。采集参数(地址/组)改动需重启程序生效。";
+            FooterText.Text = "配置已重新读取并重连采集:写入页/点动页按新组态刷新,写入许可保持原状态。";
         }
         catch (Exception ex)
         {

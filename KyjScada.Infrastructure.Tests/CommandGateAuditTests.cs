@@ -123,6 +123,65 @@ public static class CommandGateAuditTests
                 TestHelpers.AssertTrue(ids.Add(a.Id), "流水号必须唯一,重复 id " + a.Id);
             }
         });
+
+        run("值判定:闸门要求确认时一个字节都不发,确认后才下发", () =>
+        {
+            var gate = MakeGate(out _);
+
+            var sent = 0;
+
+            gate.Writer = new FakeWriter(v => { sent++; return true; }, null);
+
+            // 判定说“要确认”
+            gate.ValueGuard = (name, value) => value > 40
+                ? new KyjScada.Runtime.WriteCheck(true, true, new[] { "⚠ 超出写入上限 40" })
+                : KyjScada.Runtime.WriteCheck.Pass;
+
+            var blocked = gate.Write("SET1", 88, "hmi");
+
+            TestHelpers.AssertTrue(blocked.Verdict == KyjScada.Runtime.WriteVerdict.NeedsConfirm,
+                "越限应返回“需要确认”,实际:" + blocked.Verdict);
+            TestHelpers.AssertEq(0, sent, "需要确认时绝不能下发");
+            TestHelpers.AssertTrue(blocked.OutOfRange, "越限要标出来");
+            TestHelpers.AssertEq(0, gate.Audit.Count, "没下发的写入不该留下审计条目");
+
+            // 限速名额也不能被“被拒的写入”烧掉:确认后应当立刻能发
+            var ok = gate.Write("SET1", 88, "hmi", null, confirmed: true);
+
+            TestHelpers.AssertTrue(ok.Success, "用户确认后应放行,实际:" + ok.Message);
+            TestHelpers.AssertEq(1, sent, "确认后应真的下发一次");
+        });
+
+        run("值判定:没权限/未启用时先被闸门拦掉,不会走到确认", () =>
+        {
+            var gate = MakeGate(out _);
+
+            var sent = 0;
+
+            gate.Writer = new FakeWriter(v => { sent++; return true; }, null);
+
+            var asked = 0;
+
+            gate.ValueGuard = (name, value) => { asked++; return KyjScada.Runtime.WriteCheck.Pass; };
+
+            gate.Enabled = false;
+
+            var off = gate.Write("SET1", 1, "hmi");
+
+            TestHelpers.AssertTrue(off.Verdict == KyjScada.Runtime.WriteVerdict.Disabled,
+                "未启用应先被拦,实际:" + off.Verdict);
+            TestHelpers.AssertEq(0, asked, "未启用时不该先做值判定(别让没权限的人先看到确认框)");
+            TestHelpers.AssertEq(0, sent, "未启用时不能下发");
+
+            gate.Enabled = true;
+
+            var unknown = gate.Write("NOT_EXIST", 1, "hmi");
+
+            TestHelpers.AssertTrue(unknown.Verdict == KyjScada.Runtime.WriteVerdict.UnknownVar,
+                "未知变量应先被拦,实际:" + unknown.Verdict);
+            TestHelpers.AssertEq(0, asked, "未知变量不该走值判定");
+        });
+
     }
 
     /// <summary>造一个开好写开关、只有一个可写点的闸门。</summary>

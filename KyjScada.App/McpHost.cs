@@ -149,12 +149,16 @@ internal static class McpHost
 
                 // 半启动的主机也要关掉:StartAsync 可能已经绑上端口再抛(中间件/工具注册失败),
                 // 不 Stop/Dispose 就是孤儿监听,占着端口直到进程退出。
-                // 用 wait:false —— 这里常在界面线程上,关停等不起。
+                //
+                // 这里必须 **wait:true** 同步等关停完成:失败之后用户第一反应就是“重启 MCP”,
+                // 而 RestartMcp 走的是同一个端口 —— fire-and-forget 的关停还没把端口放掉,
+                // 重启必然再失败一次(现场表现:点一次失败,再点永远失败)。
+                // 启动失败路径本来就要给用户一句明确结论,多等这几秒是可以接受的代价。
                 if (app is not null)
                 {
                     try
                     {
-                        DisposeApp(app, wait: false);
+                        DisposeApp(app, wait: true);
                     }
                     catch
                     {

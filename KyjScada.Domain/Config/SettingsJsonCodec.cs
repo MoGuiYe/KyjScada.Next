@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -243,7 +243,9 @@ public static class SettingsJsonCodec
             LowAlarmEnable = obj.Value<bool?>("LowAlarmEnable") ?? false,
             LowAlarmValue = obj.Value<float?>("LowAlarmValue") ?? 0f,
             LowAlarmNote = obj.Value<string>("LowAlarmNote"),
-            AlarmDeadband = obj.Value<float?>("AlarmDeadband") ?? 0f
+            AlarmDeadband = obj.Value<float?>("AlarmDeadband") ?? 0f,
+            WriteLowLimit = obj.Value<double?>("WriteLowLimit"),
+            WriteHighLimit = obj.Value<double?>("WriteHighLimit")
         };
     }
 
@@ -398,6 +400,10 @@ public static class SettingsJsonCodec
 
         if (v.AlarmDeadband != 0f) obj["AlarmDeadband"] = v.AlarmDeadband;
 
+        // 写入上下限只在配了时才落盘:null 与 0 是两回事(0 是合法限值)
+        if (v.WriteLowLimit.HasValue) obj["WriteLowLimit"] = v.WriteLowLimit.Value;
+        if (v.WriteHighLimit.HasValue) obj["WriteHighLimit"] = v.WriteHighLimit.Value;
+
         return obj;
     }
 
@@ -413,7 +419,17 @@ public static class SettingsJsonCodec
     public sealed record LoadedSettings(
         ProjectConfig Project,
         List<string> Files,
-        Dictionary<string, string> DeviceFiles);
+        Dictionary<string, string> DeviceFiles)
+    {
+        /// <summary>
+        /// 解析失败被跳过的文件。
+        ///
+        /// 以前这里吞掉坏 JSON 继续合并,调用方只看“设备数是 0 才算失败”,
+        /// 于是**残缺配置**会被当成正常结果整体替换设备列表 —— 下拉框索引错位,
+        /// 切完设备后写入可能发到另一台 PLC 上。调用方必须能看见“有文件被跳过”。
+        /// </summary>
+        public List<string> Skipped { get; init; } = new();
+    }
 
     /// <summary>
     /// 恢复被"改名但没改回来"的组态文件。
@@ -492,6 +508,8 @@ public static class SettingsJsonCodec
         // 表现就是"组态突然全没了,界面上一个设备都没有",其实文件还在,只是名字多了后缀。
         RecoverOrphans(dir);
 
+        var skipped = new List<string>();
+
         var paths = Directory.GetFiles(dir, "*.json")
             .Where(f => !f.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
             .Where(f => !f.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
@@ -506,9 +524,12 @@ public static class SettingsJsonCodec
             {
                 projects = LoadFile(path);
             }
-            catch
+            catch (Exception ex)
             {
-                // 单个文件坏了不该让整个系统起不来:跳过并在 Files 里体现不出来即可
+                // 单个文件坏了不该让整个系统起不来,但**必须记账**:
+                // 上层要据此判断“这次读到的是不是完整组态”。
+                skipped.Add(Path.GetFileName(path) + ": " + ex.Message);
+
                 continue;
             }
 
@@ -551,7 +572,7 @@ public static class SettingsJsonCodec
             if (added) files.Add(Path.GetFileName(path));
         }
 
-        return new LoadedSettings(merged, files, deviceFiles);
+        return new LoadedSettings(merged, files, deviceFiles) { Skipped = skipped };
     }
 
     /// <summary>

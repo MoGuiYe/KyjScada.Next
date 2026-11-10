@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -314,12 +314,14 @@ public partial class MainWindow
         {
             var sb = new StringBuilder();
 
-            sb.Append("时间,变量,单位,最小,最大,平均,点数\n");
+            // 备注列必须一起导出:报表是拿去交班/核对的,只有英文变量名等于没写清是什么量
+            sb.Append("时间,变量,备注,单位,最小,最大,平均,点数\n");
 
             foreach (var r in _reportRows)
             {
                 sb.Append(Csv(r.TimeText)).Append(',')
                   .Append(Csv(r.VarName)).Append(',')
+                  .Append(Csv(r.Comments)).Append(',')
                   .Append(Csv(r.Unit)).Append(',')
                   .Append(r.MinText).Append(',')
                   .Append(r.MaxText).Append(',')
@@ -342,11 +344,26 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>
+    /// CSV 字段转义。与 TrendCsv/配置编辑器保持同一口径:
+    ///  · 触发字符包含 \r(裸 CR 不套引号的话,导出再导入会多出一行);
+    ///  · 以 = + - @ 开头的字段前加单引号 —— 备注/单位来自组态,Excel 会当公式执行。
+    /// </summary>
     private static string Csv(string s)
     {
         if (string.IsNullOrEmpty(s)) return "";
 
-        return s.IndexOfAny(new[] { ',', '"', '\n' }) < 0
+        // 前导空白之后才是公式才算:Excel 会忽略空格再解析 " =1+1"
+        var first = 0;
+
+        while (first < s.Length && (s[first] is ' ' or '\t')) first++;
+
+        if (first < s.Length && s[first] is '=' or '+' or '-' or '@' or '\t' or '\r')
+        {
+            s = "'" + s;
+        }
+
+        return s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) < 0
             ? s
             : "\"" + s.Replace("\"", "\"\"") + "\"";
     }

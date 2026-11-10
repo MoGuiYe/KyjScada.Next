@@ -1,4 +1,4 @@
-namespace KyjScada.Domain.Config;
+﻿namespace KyjScada.Domain.Config;
 
 /// <summary>
 /// 变量配置。全系统唯一的变量模型。
@@ -52,6 +52,18 @@ public sealed class VariableConfig
     /// 启用后:超上限报警,必须降回 上限-死区 才消除。
     /// </summary>
     public float AlarmDeadband { get; set; }
+
+    /// <summary>
+    /// 写入值下限(工程值)。null = 未配置。
+    ///
+    /// 为什么不复用报警上下限:报警阈值是"设备运行允许的范围",
+    /// 而写入合法范围是"这个设定点允许被设成多少",两者经常不同 ——
+    /// 频率给定 10Hz 低于报警低限 20Hz 是正常操作,拿报警线当写入线会天天误弹。
+    /// </summary>
+    public double? WriteLowLimit { get; set; }
+
+    /// <summary>写入值上限(工程值)。null = 未配置。</summary>
+    public double? WriteHighLimit { get; set; }
 
     public VariableConfig Clone()
     {

@@ -954,7 +954,10 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                 // 用 WriteCoil 会写到同号线圈上 —— 完全是另一个点。
                 if (parsed.Value.Fn == ModbusFunction.ReadCoils)
                 {
-                    _client.WriteCoil (writeAddress, rawValue != 0);
+                    // 线圈只有 true/false 两态,**不能拿逆换算后的 rawValue 判**:
+                    // 组态给 Bool 配了 Offset=1 时,写 0 会算出 raw=-1,-1 != 0 于是线圈置位 ——
+                    // 开关语义彻底反过来。Bool 的输入本来就是 0/1 工程值,直接用。
+                    _client.WriteCoil (writeAddress, Math.Abs (value) > 1e-9 && !double.IsNaN (value));
                     LastError = null;
                     return true;
                 }

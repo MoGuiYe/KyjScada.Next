@@ -441,53 +441,69 @@ KyjScada.Infrastructure.Tests.CommandGateAuditTests.RunAll(Run);
             KyjScada.Infrastructure.Tests.TestHelpers.AssertEq (129, total, "这份配置共 129 个变量");
         });
 
-Run("写入差异校验:与当前值一致静默放行、不一致要确认、越限标越界", () =>
+Run("写入差异校验:一致放行、不一致要确认、越写入限标越界、Bool 只收 0/1", () =>
 {
+    var lim = new KyjScada.Runtime.WriteLimits(40, 20, "Hz");
+
     // 一致:不打扰(每写一次都弹框,操作员会闭眼点确定,提示就失效了)
-    var same = KyjScada.Runtime.WriteGuard.Evaluate(30, 30, true, 40, true, 20, "Hz");
+    var same = KyjScada.Runtime.WriteGuard.Evaluate(30, KyjScada.Runtime.CurrentSample.Of(30), lim);
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!same.NeedsConfirm, "值没变不应弹确认");
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!same.OutOfRange, "值没变不算越界");
 
     // 只是不同:要确认,但不算越界
-    var changed = KyjScada.Runtime.WriteGuard.Evaluate(35, 30, true, 40, true, 20, "Hz");
+    var changed = KyjScada.Runtime.WriteGuard.Evaluate(35, KyjScada.Runtime.CurrentSample.Of(30), lim);
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(changed.NeedsConfirm, "值变了应弹确认");
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!changed.OutOfRange, "在范围内不算越界");
 
     // 超上限:确认 + 越界
-    var high = KyjScada.Runtime.WriteGuard.Evaluate(88, 30, true, 40, true, 20, "Hz");
+    var high = KyjScada.Runtime.WriteGuard.Evaluate(88, KyjScada.Runtime.CurrentSample.Of(30), lim);
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(high.NeedsConfirm, "超上限必须确认");
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(high.OutOfRange, "超上限要标越界");
 
     // 低于下限:同样越界
-    var low = KyjScada.Runtime.WriteGuard.Evaluate(5, 30, true, 40, true, 20, "Hz");
+    var low = KyjScada.Runtime.WriteGuard.Evaluate(5, KyjScada.Runtime.CurrentSample.Of(30), lim);
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(low.OutOfRange, "低于下限要标越界");
 
-    // 组态没配范围时:变化超过 30% 也要确认
-    var bigJump = KyjScada.Runtime.WriteGuard.Evaluate(100, 10, false, 0, false, 0);
+    // 组态没配写入范围时:变化超过 30% 也要确认
+    var bigJump = KyjScada.Runtime.WriteGuard.Evaluate(100, KyjScada.Runtime.CurrentSample.Of(10),
+        new KyjScada.Runtime.WriteLimits(null, null));
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(bigJump.NeedsConfirm, "无范围时大幅变化应确认");
 
-    // 没配范围、也没采到当前值:无从比较,不弹框(否则每个点第一次写都弹)
-    var noCurrent = KyjScada.Runtime.WriteGuard.Evaluate(100, null, false, 0, false, 0);
+    // 当前值不可信:必须确认 —— 不知道现状就不能悄悄下发(这是本轮修掉的漏洞)
+    var untrusted = KyjScada.Runtime.WriteGuard.Evaluate(50, KyjScada.Runtime.CurrentSample.Unknown,
+        new KyjScada.Runtime.WriteLimits(null, null));
 
-    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!noCurrent.NeedsConfirm, "没有当前值不应弹确认");
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(untrusted.NeedsConfirm, "读不到当前值时写入必须确认");
 
     // 浮点毛刺不算"不同":1.6000001 与 1.6 是同一个值
-    var noise = KyjScada.Runtime.WriteGuard.Evaluate(1.6000001, 1.6, false, 0, false, 0);
+    var noise = KyjScada.Runtime.WriteGuard.Evaluate(1.6000001, KyjScada.Runtime.CurrentSample.Of(1.6),
+        new KyjScada.Runtime.WriteLimits(null, null));
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!noise.NeedsConfirm, "浮点噪声不应触发确认");
 
+    // Bool:只收 0/1;而且**不做差异确认**(点动本来就是改状态)
+    var boolLim = new KyjScada.Runtime.WriteLimits(null, null, "", IsBool: true);
+    var boolOn = KyjScada.Runtime.WriteGuard.Evaluate(1, KyjScada.Runtime.CurrentSample.Of(0), boolLim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!boolOn.NeedsConfirm, "Bool 写 1 不需要确认(点动语义)");
+
+    var boolBad = KyjScada.Runtime.WriteGuard.Evaluate(0.5, KyjScada.Runtime.CurrentSample.Of(0), boolLim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(boolBad.NeedsConfirm && boolBad.OutOfRange, "Bool 写 0.5 必须拦");
+
     // 确认框正文要能看懂:带变量名、输入值、当前值和逐条理由
-    var text = KyjScada.Runtime.WriteGuard.Describe("LQB1_Fre_Set", "设定值", 88, 30, high);
+    var text = KyjScada.Runtime.WriteGuard.Describe("LQB1_Fre_Set", "设定值", 88,
+        KyjScada.Runtime.CurrentSample.Of(30), high);
 
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(text.Contains("LQB1_Fre_Set"), "正文应含变量名");
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(text.Contains("88"), "正文应含输入值");
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(text.Contains("30"), "正文应含当前值");
-    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(text.Contains("高限"), "正文应说明越了哪条限");
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(text.Contains("上限"), "正文应说明越了哪条限");
 });
 
 Run("点动候选:现场配置把「状态值」组标为可写后,52 个 Bool 全部可点动", () =>

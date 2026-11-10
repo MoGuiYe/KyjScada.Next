@@ -24,7 +24,10 @@ public enum WriteVerdict
     Rejected = 5,
 
     /// <summary>设备返回失败。</summary>
-    DeviceError = 6
+    DeviceError = 6,
+
+    /// <summary>值本身没被拒,但和当前状态不一致,需要人工确认后才下发。</summary>
+    NeedsConfirm = 7
 }
 
 /// <summary>一次写入的结果。</summary>
@@ -32,9 +35,19 @@ public sealed record WriteOutcome(WriteVerdict Verdict, string Message)
 {
     public bool Success => Verdict == WriteVerdict.Ok;
 
+    /// <summary>需要确认时:该值是否越过了组态给的写入上下限(界面据此选更醒目的提示)。</summary>
+    public bool OutOfRange { get; init; }
+
+    /// <summary>需要确认时:是否“无法核实”(读不到当前值)。远程写入遇到它必须直接拒。</summary>
+    public bool Unverifiable { get; init; }
+
     public static WriteOutcome Ok(string msg) => new(WriteVerdict.Ok, msg);
 
     public static WriteOutcome Fail(WriteVerdict v, string msg) => new(v, msg);
+
+    /// <summary>可以通过,但要先让人确认。**没有任何字节被下发**。</summary>
+    public static WriteOutcome Confirm(string msg, bool outOfRange, bool unverifiable = false) =>
+        new(WriteVerdict.NeedsConfirm, msg) { OutOfRange = outOfRange, Unverifiable = unverifiable };
 }
 
 /// <summary>
@@ -200,6 +213,18 @@ public sealed class CommandGate
     /// <summary>实际下发用的写入器。为 null 时 Write 只能校验不能下发。</summary>
     public IDeviceWriter? Writer { get; set; }
 
+    /// <summary>
+    /// 下发前的值判定:返回非 null 表示"要先确认",闸门就**一个字节都不发**。
+    ///
+    /// 为什么放在闸门而不是各页面:写入口有六处(界面数值行、Bool 按钮、点动、急停、
+    /// 报警复位、MCP 远程写)。安全逻辑放页面里,新加一个入口就漏一次 ——
+    /// 之前 MCP 就是直接 Write,一句 write_variable("X", 5000) 直发 PLC。
+    /// 放在这里,凡是 Write 都必须过这道关。
+    ///
+    /// 默认 null = 不做值判定(单测里构造的闸门、以及没有组态的场景行为不变)。
+    /// </summary>
+    public Func<string, double, WriteCheck>? ValueGuard { get; set; }
+
     private readonly Dictionary<string, bool> _writable = new (StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _reason = new (StringComparer.OrdinalIgnoreCase);
 
@@ -267,7 +292,12 @@ public sealed class CommandGate
     /// 一次完整写入:开关 → 可写性 → 值合法性 → 占用/限速 → 真正下发。
     /// **所有校验都在下发之前完成**,任何一步不过就一个字节都不发。
     /// </summary>
-    public WriteOutcome Write (string varName, double value, string moduleId = "hmi", object? rawValue = null)
+    /// <param name="confirmed">
+    /// true = 调用方已经拿 <see cref="ValueGuard"/> 的结论问过人了(或本身不需要问)。
+    /// 只该在"确认框已经弹过、用户点了是"之后传 true。
+    /// </param>
+    public WriteOutcome Write (string varName, double value, string moduleId = "hmi", object? rawValue = null,
+        bool confirmed = false)
     {
         if (!Enabled)
         {
@@ -300,6 +330,28 @@ public sealed class CommandGate
         if (double.IsNaN (value) || double.IsInfinity (value))
         {
             return WriteOutcome.Fail (WriteVerdict.BadValue, "值非法(NaN/Infinity)");
+        }
+
+        // 值判定放在占用/限速之前:被要求确认的写入不该烧掉限速名额,也不该落审计条目
+        // —— 它从来没发出去过。
+        if (!confirmed && ValueGuard is not null)
+        {
+            WriteCheck check;
+
+            try
+            {
+                check = ValueGuard (varName, value);
+            }
+            catch
+            {
+                // 判定本身出错时按"要确认"处理:宁可多问一句,不可静默下发
+                check = new WriteCheck (true, true, new[] { "值判定失败,请人工确认" });
+            }
+
+            if (check.NeedsConfirm)
+            {
+                return WriteOutcome.Confirm (string.Join ("; ", check.Reasons), check.OutOfRange, check.Unverifiable);
+            }
         }
 
         // 占用与限速交给已有的 TryEnter(它已经处理了模块互斥与最小间隔)

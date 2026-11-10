@@ -56,11 +56,28 @@ public sealed class ConfigReader
             .ToList();
     }
 
-    /// <summary>按文件名加载组态(带缓存)。</summary>
-    public ProjectConfig? Load(string fileName)
+    /// <summary>
+    /// 按文件名加载组态(带缓存),**把失败原因直接返回给调用方**。
+    ///
+    /// 为什么不用实例字段传错误:MCP 是多请求并发的,LastError 属于实例,
+    /// 请求 A 正在读、请求 B 成功加载后把它清空,A 拿到的就是 null ——
+    /// “组态坏了”于是被回成“没有组态”,AI 转头去查别的东西。
+    /// 失败原因跟着这一次调用走,才不会串味。
+    /// </summary>
+    public bool TryLoad(string fileName, out ProjectConfig? project, out string? error)
     {
+        project = null;
+        error = null;
+
         var path = Path.Combine(_settingsDir, fileName);
-        if (!File.Exists(path)) return null;
+
+        if (!File.Exists(path))
+        {
+            // 文件不存在也要给原因,不能留着上一次调用的错误
+            error = "组态文件 " + fileName + " 不存在";
+
+            return false;
+        }
 
         var stamp = File.GetLastWriteTimeUtc(path);
 
@@ -68,7 +85,9 @@ public sealed class ConfigReader
         {
             if (_cache.TryGetValue(fileName, out var hit) && hit.Stamp == stamp)
             {
-                return hit.Config;
+                project = hit.Config;
+
+                return true;
             }
         }
 
@@ -87,9 +106,9 @@ public sealed class ConfigReader
         }
         catch (Exception ex)
         {
-            LastError = "读取组态文件 " + fileName + " 失败:" + ex.Message;
+            LastError = error = "读取组态文件 " + fileName + " 失败:" + ex.Message;
 
-            return null;
+            return false;
         }
 
         var text = DecodeUtf8WithBom(bytes);
@@ -102,23 +121,31 @@ public sealed class ConfigReader
         }
         catch (Exception ex)
         {
-            LastError = "组态文件 " + fileName + " 不是合法的 JSON(可能正在被改写):" + ex.Message;
+            LastError = error = "组态文件 " + fileName + " 不是合法的 JSON(可能正在被改写):" + ex.Message;
 
-            return null;
+            return false;
         }
 
-        var project = list?.FirstOrDefault();
+        var loaded = list?.FirstOrDefault();
 
-        if (project == null)
+        if (loaded == null)
         {
-            LastError = "组态文件 " + fileName + " 里没有项目配置(空数组?)";
+            LastError = error = "组态文件 " + fileName + " 里没有项目配置(空数组?)";
 
-            return null;
+            return false;
         }
 
-        lock (_cacheLock) _cache[fileName] = (project, stamp);
+        lock (_cacheLock) _cache[fileName] = (loaded, stamp);
 
-        return project;
+        project = loaded;
+
+        return true;
+    }
+
+    /// <summary>只要结果、不要原因的调用方用这个。</summary>
+    public ProjectConfig? Load(string fileName)
+    {
+        return TryLoad(fileName, out var project, out _) ? project : null;
     }
 
     /// <summary>列出组态里的全部变量(扁平化)。</summary>
