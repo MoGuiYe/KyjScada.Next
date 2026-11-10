@@ -154,7 +154,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         //
         // 这里给整轮设上限:超时就把**剩下的组直接标成未采集并发布**,
         // 保证界面最多迟钝一个预算周期,而不是无限期显示旧值。
-        var cycleBudgetMs = Math.Max (2000, CycleBudget.TotalMilliseconds);
+        var cycleBudgetMs = (long)Math.Max (2000, CycleBudget.TotalMilliseconds);
         var cycleStart = Environment.TickCount64;
 
         var aborted = false;
@@ -171,7 +171,10 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                 break;
             }
 
-            successCount += CollectGroup (group, batch, sampleTime);
+            // 把"还剩多少预算"传进组内:单组多帧(>125 寄存器要分帧)时,
+            // 只在组间检查是拦不住的 —— 一个组自己就能累积到几十秒,
+            // 界面看门狗会把它误判成卡死,重建 + 冷却 → 慢设备反复断连。
+            successCount += CollectGroup (group, batch, sampleTime, cycleStart, cycleBudgetMs);
         }
 
         if (aborted)
@@ -192,11 +195,24 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             }
 
             LastError ??= "本轮通讯超时(超过 " + (cycleBudgetMs / 1000.0).ToString ("0.#") + " 秒),已中断其余组的采集";
+
         }
 
         // 只有真正读到数据才清掉错误;连上了但一路读失败仍要保留原因
-        if (successCount == 0) LastError ??= "已连接但未读到任何数据(从站无响应或地址不对)";
-        else LastError = null;
+        // aborted 时**不能**清错误:前半组读到了数据,后半组因为超预算被标成未采集,
+        // 清掉原因会让状态栏显示"通讯正常",而表里一半是"--",现场根本查不出为什么。
+        if (aborted)
+        {
+            // 保留上面写入的超时原因
+        }
+        else if (successCount == 0)
+        {
+            LastError ??= "已连接但未读到任何数据(从站无响应或地址不对)";
+        }
+        else
+        {
+            LastError = null;
+        }
 
         bus.Publish (batch);
         return successCount;
@@ -243,8 +259,14 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         }
     }
 
-    private int CollectGroup (GroupConfig group, Dictionary<string, TagValue> batch, DateTime t)
+    /// <param name="cycleStart">本轮采集起点(TickCount64)。</param>
+    /// <param name="cycleBudgetMs">本轮时间预算;分帧读在每帧前都要查,超了就停。</param>
+    private int CollectGroup (
+        GroupConfig group, Dictionary<string, TagValue> batch, DateTime t,
+        long cycleStart, long cycleBudgetMs)
     {
+        var deadlineTick = cycleStart + cycleBudgetMs;
+
         var vars = group.VarList;
         var parsed = ParseGroupStart (group.Start);
 
@@ -273,15 +295,15 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             if (fn == ModbusFunction.ReadCoils)
             {
-                raw = CoilsToWords (ReadCoilsChunked (baseOffset, length, spans, out arrived));
+                raw = CoilsToWords (ReadCoilsChunked (baseOffset, length, spans, deadlineTick, out arrived));
             }
             else if (fn == ModbusFunction.ReadInputRegisters)
             {
-                raw = ReadRegistersChunked (baseOffset, length, spans, true, out arrived);
+                raw = ReadRegistersChunked (baseOffset, length, spans, true, deadlineTick, out arrived);
             }
             else
             {
-                raw = ReadRegistersChunked (baseOffset, length, spans, false, out arrived);
+                raw = ReadRegistersChunked (baseOffset, length, spans, false, deadlineTick, out arrived);
             }
         }
         catch (Exception ex)
@@ -428,13 +450,23 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     /// 现在按实到的长度拷贝,点位级判断"我这几个寄存器到齐没有"。
     /// </summary>
     private ushort[] ReadRegistersChunked (
-        int start, int count, IReadOnlyList<(int Offset, int Length)> spans, bool input, out bool[] arrived)
+        int start, int count, IReadOnlyList<(int Offset, int Length)> spans, bool input,
+        long deadlineTick, out bool[] arrived)
     {
         var all = new ushort[count];
         arrived = new bool[count];
 
         foreach (var (offset, take) in PlanChunks (count, MaxRegistersPerRead, spans))
         {
+            // 预算检查必须放在**每帧之前**:只在组间查是拦不住的 ——
+            // 一个组自己就能分很多帧,设备慢时累积几十秒,界面看门狗会误判成卡死。
+            if (deadlineTick > 0 && Environment.TickCount64 > deadlineTick)
+            {
+                LastError ??= "本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理";
+
+                break;
+            }
+
             CheckAddress (start + offset, take);
 
             var part = input
@@ -459,13 +491,21 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
     /// <summary>按协议上限分段读线圈(判定口径同 <see cref="ReadRegistersChunked"/>)。</summary>
     private bool[] ReadCoilsChunked (
-        int start, int count, IReadOnlyList<(int Offset, int Length)> spans, out bool[] arrived)
+        int start, int count, IReadOnlyList<(int Offset, int Length)> spans,
+        long deadlineTick, out bool[] arrived)
     {
         var all = new bool[count];
         arrived = new bool[count];
 
         foreach (var (offset, take) in PlanChunks (count, MaxCoilsPerRead, spans))
         {
+            if (deadlineTick > 0 && Environment.TickCount64 > deadlineTick)
+            {
+                LastError ??= "本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理";
+
+                break;
+            }
+
             CheckAddress (start + offset, take);
 
             var part = _client.ReadCoils ((ushort)(start + offset), (ushort)take);

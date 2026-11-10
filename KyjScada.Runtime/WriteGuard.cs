@@ -17,6 +17,15 @@ public sealed record WriteCheck(bool NeedsConfirm, bool OutOfRange, IReadOnlyLis
     /// </summary>
     public bool Unverifiable { get; init; }
 
+    /// <summary>
+    /// 远程(MCP)写入是否必须直接拒绝。
+    ///
+    /// 远程没人能点"确认",所以不能像本地那样问一句再发 —— 只能放行或拒绝。
+    /// 判据:**值本身危险或无法核实就拒**;仅仅"与当前值不同"是正常操作,不能拒,
+    /// 否则远程写就彻底没法用了(曾经把任何差异都拒掉,功能名存实亡)。
+    /// </summary>
+    public bool BlocksRemote => OutOfRange || Unverifiable;
+
     public static readonly WriteCheck Pass = new(false, false, Array.Empty<string>());
 }
 
@@ -56,41 +65,43 @@ public static class WriteGuard
 
     public static WriteCheck Evaluate(double value, CurrentSample current, WriteLimits? limits)
     {
+        // NaN/Inf 属于"值本身没意义",本地不能写、远程更不能写
         if (double.IsNaN(value) || double.IsInfinity(value))
         {
-            return new WriteCheck(true, true, new[] { "值本身非法(NaN/Infinity)" });
+            return new WriteCheck(true, true, new[] { "值本身非法(NaN/Infinity)" }) { Unverifiable = true };
+        }
+
+        var isBool = limits?.IsBool == true;
+
+        // Bool:只有 0/1 两个合法取值。0.5 这种值发下去设备行为不可预期
+        if (isBool && Math.Abs(value) > Epsilon && Math.Abs(value - 1) > Epsilon)
+        {
+            return new WriteCheck(true, true, new[] { "Bool 点只接受 0(关)或 1(开),输入为 " + Fmt(value) });
         }
 
         var reasons = new List<string>();
         var outOfRange = false;
+        var unverifiable = false;
 
         var unit = limits?.Unit is { Length: > 0 } u ? " " + u : "";
 
-        // Bool:只有 0/1 两个合法取值。0.5 这种值发下去设备行为不可预期
-        if (limits?.IsBool == true)
-        {
-            if (Math.Abs(value) > Epsilon && Math.Abs(value - 1) > Epsilon)
-            {
-                return new WriteCheck(true, true, new[] { "Bool 点只接受 0(关)或 1(开),输入为 " + Fmt(value) });
-            }
-
-            return WriteCheck.Pass;
-        }
-
-        // 当前值不可信:没有"与现状比较"的依据,任何写入都得先确认
-        var unverifiable = false;
-
+        // 当前值不可信:没有"与现状比较"的依据。
+        // **这一条 Bool 也要查** —— 早先 Bool 分支直接 return Pass 跑在前面,
+        // 断线时远程写启停线圈可以零校验直发,正是最危险的那一类。
         if (!current.Trusted || !current.Value.HasValue)
         {
             reasons.Add("⚠ 读不到当前值(未连接/未采集/质量不可信),无法判断这个值是否合理");
 
             unverifiable = true;
         }
-        else if (Math.Abs(current.Value.Value - value) > Epsilon)
+        else if (!isBool && Math.Abs(current.Value.Value - value) > Epsilon)
         {
+            // Bool 只豁免"差异确认":点动/启停本来就是改状态,问一句毫无意义。
+            // 数值点才需要"你确定要从 1.6 改成 88 吗"。
             reasons.Add("当前值 " + Fmt(current.Value.Value) + unit + " → 将写入 " + Fmt(value) + unit);
         }
 
+        // 写入上下限对 Bool 同样有效(配了就越界要拦),只是实际组态里很少给 Bool 配
         if (limits?.High is { } high && value > high)
         {
             reasons.Add("⚠ 超出写入上限 " + Fmt(high) + unit);
@@ -105,10 +116,11 @@ public static class WriteGuard
             outOfRange = true;
         }
 
-        // 组态一个限都没配时,才用粗兜底;配了范围就以配置为准,不再叠加噪音提示
+        // 组态一个限都没配时,才用粗兜底;配了范围就以配置为准,不再叠加噪音提示。
+        // Bool 不参与:0↔1 天然是 100% 变化,套这个规则等于每次都弹框。
         var hasRange = limits?.High is not null || limits?.Low is not null;
 
-        if (!hasRange && current.Trusted && current.Value.HasValue
+        if (!isBool && !hasRange && current.Trusted && current.Value.HasValue
             && Math.Abs(current.Value.Value) > Epsilon
             && Math.Abs(value - current.Value.Value) > Math.Abs(current.Value.Value) * FallbackRelativeDelta)
         {

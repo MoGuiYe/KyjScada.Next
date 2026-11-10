@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -360,6 +360,66 @@ public partial class ConfigEditorWindow : Window
 
         AddFloat("报警死区", v.AlarmDeadband, x => { v.AlarmDeadband = x; MarkDirty(); },
             "0 = 不启用。液位这类在阈值附近波动的量建议配死区,否则会反复触发/消除");
+
+        // 写入上下限:留空 = 不配置(只做差异确认)。
+        // 绝不能拿报警阈值代替它 —— 频率给定 10Hz 低于报警低限 20Hz 是正常操作。
+        AddNullableDouble("写入下限", v.WriteLowLimit, x => { v.WriteLowLimit = x; MarkDirty(); },
+            "留空=不限制。写入值低于它是越界,需要确认;远程写入会被直接拒绝");
+        AddNullableDouble("写入上限", v.WriteHighLimit, x => { v.WriteHighLimit = x; MarkDirty(); },
+            "留空=不限制。写入值高于它是越界,需要确认;远程写入会被直接拒绝");
+    }
+
+    /// <summary>
+    /// 可空数值输入框(double?)。**留空表示"未配置"**,而不是 0 ——
+    /// 0 是合法限值,两者必须区分,所以不能用普通数值框。
+    /// </summary>
+    private void AddNullableDouble(string label, double? value, Action<double?> setter, string? hint = null)
+    {
+        var row = MakeRow(label);
+
+        var box = new TextBox
+        {
+            Text = value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : "",
+            Width = 140,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(0x18, 0x18, 0x25)),
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(0xFF, 0xFF, 0xFF)),
+            BorderBrush = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(0x45, 0x47, 0x5A)),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(4, 3, 4, 3)
+        };
+
+        System.Windows.Automation.AutomationProperties.SetName(box, label);
+
+        box.TextChanged += (_, _) =>
+        {
+            var text = box.Text.Trim();
+
+            // 留空 = 取消配置
+            if (text.Length == 0)
+            {
+                setter(null);
+
+                return;
+            }
+
+            if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) return;
+
+            // NaN/Infinity 会被 TryParse 认成合法输入,但会让越界比较恒为 false ——
+            // 等于"配了保护其实没有",这里直接不接受
+            if (double.IsNaN(d) || double.IsInfinity(d)) return;
+
+            setter(d);
+        };
+
+        row.Children.Add(box);
+
+        PropPanel.Children.Add(row);
+
+        if (hint is not null) AddLabel(hint);
     }
 
     private static int FindTypeIndex(string? type)

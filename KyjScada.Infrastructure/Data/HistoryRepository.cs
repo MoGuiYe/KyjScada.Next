@@ -95,10 +95,19 @@ public sealed class HistoryRepository : IHistoryRepository
             // journal_mode 只在建库时切一次(它是库级持久设置),
             // 不要放进 OpenConnection:每条连接都切等于每次都要抢独占锁。
             // WAL:读写并发,写不阻塞读。老库实测就是 WAL。
+            var walOk = false;
+
             using (var pragma = conn.CreateCommand())
             {
                 pragma.CommandText = "PRAGMA journal_mode=wal;";
-                pragma.ExecuteScalar();
+
+                // **必须看返回值**:库被别的连接占着、或老库停在 delete 模式时,
+                // 这句会"执行成功但没切过去",返回的仍是 delete。
+                // 早先把返回值丢掉就标记建表完成 —— 于是本进程**永不重试**,
+                // 一直跑在 delete 模式下读写互锁,现场表现是"偶尔写库失败,重启就好"。
+                var mode = pragma.ExecuteScalar() as string;
+
+                walOk = string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase);
             }
 
             foreach (var sql in HistorySchema.AllCreateStatements)
@@ -108,7 +117,9 @@ public sealed class HistoryRepository : IHistoryRepository
                 cmd.ExecuteNonQuery();
             }
 
-            SchemaReady.Add(_dbPath);
+            // 只有真的切到 WAL 才认为"库准备好了";
+            // 没切成功就不登记,下一次调用会再试一遍(而不是永远停在 delete 模式)。
+            if (walOk) SchemaReady.Add(_dbPath);
         }
     }
 

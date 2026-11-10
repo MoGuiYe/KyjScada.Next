@@ -1,4 +1,4 @@
-using KyjScada.Domain.Config;
+﻿using KyjScada.Domain.Config;
 using KyjScada.Infrastructure.Acquisition;
 
 namespace KyjScada.Infrastructure.Config;
@@ -154,6 +154,26 @@ public static class ConfigValidator
                 if (v.AlarmDeadband < 0f)
                 {
                     problems.Add(where + ": 报警死区不能为负");
+                }
+
+                // ================= 写入上下限 =================
+                // 这两个值直接决定"写入是否被判越界",配错了比不配更危险:
+                //   · NaN 时 value > NaN 恒为 false → 任何值都静默放行,看着像"配了保护"其实没有;
+                //   · 上限 < 下限时两边都判越界,任何值都写不进去,现场只会以为"功能坏了"。
+                if (v.WriteHighLimit is { } wh && (double.IsNaN(wh) || double.IsInfinity(wh)))
+                {
+                    problems.Add(where + ": 写入上限不是有效数值(NaN/Infinity),越界判定会失效");
+                }
+
+                if (v.WriteLowLimit is { } wl && (double.IsNaN(wl) || double.IsInfinity(wl)))
+                {
+                    problems.Add(where + ": 写入下限不是有效数值(NaN/Infinity),越界判定会失效");
+                }
+
+                if (v.WriteHighLimit is { } h2 && v.WriteLowLimit is { } l2
+                    && !double.IsNaN(h2) && !double.IsNaN(l2) && h2 < l2)
+                {
+                    problems.Add(where + ": 写入上限 " + h2 + " 小于写入下限 " + l2 + "(设置反了,任何值都会被判越界)");
                 }
             }
         }

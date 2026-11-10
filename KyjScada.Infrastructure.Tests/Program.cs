@@ -506,6 +506,134 @@ Run("写入差异校验:一致放行、不一致要确认、越写入限标越�
     KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(text.Contains("上限"), "正文应说明越了哪条限");
 });
 
+Run("写入范围:留空不等于 0、上下限配反与 NaN 都要能被校验拦住", () =>
+{
+    var v = new KyjScada.Domain.Config.VariableConfig { VarName = "SP", VarType = "Float" };
+
+    // 留空 = 未配置;配了 0 是合法限值 —— 两者必须能区分
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(v.WriteLowLimit is null, "默认应为未配置");
+
+    v.WriteLowLimit = 0;
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(v.WriteLowLimit is 0d, "0 是合法限值,不能和 null 混");
+
+    // JSON 往返:null 不落盘,0 要落盘
+    var json = KyjScada.Domain.Config.SettingsJsonCodec.ToJson(
+        new List<KyjScada.Domain.Config.ProjectConfig>
+        {
+            new KyjScada.Domain.Config.ProjectConfig
+            {
+                ProjectName = "P",
+                DevicesByProtocol = new Dictionary<string, List<KyjScada.Domain.Config.DeviceConfig>>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["ModbusTCP"] = new List<KyjScada.Domain.Config.DeviceConfig>
+                    {
+                    new KyjScada.Domain.Config.DeviceConfig
+                    {
+                        DeviceName = "D",
+                        GroupList = new List<KyjScada.Domain.Config.GroupConfig>
+                        {
+                            new KyjScada.Domain.Config.GroupConfig
+                            {
+                                GroupName = "设定值", IsWritable = true, Start = "1.400001", Length = 10,
+                                VarList = new List<KyjScada.Domain.Config.VariableConfig>
+                                {
+                                    new KyjScada.Domain.Config.VariableConfig
+                                    {
+                                        VarName = "SP", VarType = "Float",
+                                        WriteLowLimit = 0, WriteHighLimit = 50
+                                    },
+                                    new KyjScada.Domain.Config.VariableConfig { VarName = "SP2", VarType = "Float" }
+                                }
+                            }
+                        }
+                    }
+                    }
+                }
+            }
+        });
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(json.Contains("\"WriteLowLimit\""), "配了的写入下限要落盘");
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(json.Contains("\"WriteHighLimit\""), "配了的写入上限要落盘");
+
+    // 上限 < 下限:必须报错,否则任何值都会被判越界
+    var bad = new KyjScada.Domain.Config.DeviceConfig
+    {
+        DeviceName = "D",
+        GroupList = new List<KyjScada.Domain.Config.GroupConfig>
+        {
+            new KyjScada.Domain.Config.GroupConfig
+            {
+                GroupName = "设定值", Start = "1.400001", Length = 10,
+                VarList = new List<KyjScada.Domain.Config.VariableConfig>
+                {
+                    new KyjScada.Domain.Config.VariableConfig
+                    {
+                        VarName = "SP", VarType = "Float", WriteLowLimit = 50, WriteHighLimit = 10
+                    }
+                }
+            }
+        }
+    };
+
+    var project = new KyjScada.Domain.Config.ProjectConfig
+    {
+        ProjectName = "P",
+        DevicesByProtocol = new Dictionary<string, List<KyjScada.Domain.Config.DeviceConfig>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ModbusTCP"] = new List<KyjScada.Domain.Config.DeviceConfig> { bad }
+        }
+    };
+
+    var problems = KyjScada.Infrastructure.Config.ConfigValidator.Validate(project);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(
+        problems.Any(p => p.Contains("写入上限")), "上限小于下限必须报出来");
+
+    // NaN:value > NaN 恒为 false,会让越界判定静默失效
+    bad.GroupList[0].VarList[0].WriteHighLimit = double.NaN;
+
+    var problems2 = KyjScada.Infrastructure.Config.ConfigValidator.Validate(project);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(
+        problems2.Any(p => p.Contains("写入上限")), "NaN 上限必须报出来");
+});
+
+Run("远程写入:只有越界/不可核实才拒,普通差异要放行", () =>
+{
+    var lim = new KyjScada.Runtime.WriteLimits(40, 20, "Hz", false);
+
+    // 普通差异:值为 35、当前 30、在范围内 —— 本地要确认,远程不该被拒
+    var diff = KyjScada.Runtime.WriteGuard.Evaluate(35, KyjScada.Runtime.CurrentSample.Of(30), lim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(diff.NeedsConfirm, "本地仍要确认");
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!diff.BlocksRemote, "普通差异不能拒远程写");
+
+    // 越界:远程必须拒
+    var over = KyjScada.Runtime.WriteGuard.Evaluate(88, KyjScada.Runtime.CurrentSample.Of(30), lim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(over.BlocksRemote, "越界必须拒远程写");
+
+    // 无法核实:远程必须拒
+    var unknown = KyjScada.Runtime.WriteGuard.Evaluate(35, KyjScada.Runtime.CurrentSample.Unknown, lim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(unknown.BlocksRemote, "读不到当前值时不能放行远程写");
+
+    // ---- Bool:豁免"差异确认",但**不豁免**不可核实 ----
+    var boolLim = new KyjScada.Runtime.WriteLimits(null, null, "", IsBool: true);
+
+    var boolOk = KyjScada.Runtime.WriteGuard.Evaluate(1, KyjScada.Runtime.CurrentSample.Of(0), boolLim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(!boolOk.NeedsConfirm, "Bool 写 1 不该因为值变了就要求确认");
+
+    var boolUnknown = KyjScada.Runtime.WriteGuard.Evaluate(1, KyjScada.Runtime.CurrentSample.Unknown, boolLim);
+
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(boolUnknown.NeedsConfirm,
+        "Bool 在断线(当前值不可信)时也必须拦 —— 早先这里直接放行");
+    KyjScada.Infrastructure.Tests.TestHelpers.AssertTrue(boolUnknown.BlocksRemote,
+        "Bool 不可核实时远程写要拒");
+});
+
 Run("点动候选:现场配置把「状态值」组标为可写后,52 个 Bool 全部可点动", () =>
 {
     var path = FindRealSettings();

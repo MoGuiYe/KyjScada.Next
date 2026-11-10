@@ -1,4 +1,4 @@
-using KyjScada.Contracts;
+﻿using KyjScada.Contracts;
 using KyjScada.Domain.Config;
 
 namespace KyjScada.Runtime;
@@ -135,6 +135,54 @@ public sealed class AcquisitionCoordinator : IDisposable
         fresh?.Start();
 
         return fresh;
+    }
+
+    /// <summary>
+    /// 重建单台设备,且**不在调用线程上等待旧流水线释放**。
+    ///
+    /// 与 <see cref="Restart"/> 的差别只有一处:释放放到线程池并 await。
+    /// 顺序仍然保证(先放旧连接再建新的),但界面线程最多只被 await 挂起,
+    /// 不会像同步 StopAndWait 那样整窗冻结。
+    /// </summary>
+    public async Task<DevicePipeline?> RestartAsync(DeviceConfig device)
+    {
+        if (string.IsNullOrWhiteSpace(device.DeviceName)) return null;
+
+        DevicePipeline? old;
+
+        lock (_lock)
+        {
+            _pipelines.Remove(device.DeviceName, out old);
+        }
+
+        if (old is not null) await old.ReleaseAsync().ConfigureAwait(true);
+
+        Build(new[] { device }, null, dropMissing: false);
+
+        var fresh = Find(device.DeviceName);
+
+        fresh?.Start();
+
+        return fresh;
+    }
+
+    /// <summary>
+    /// 停掉并释放**全部**流水线,释放过程不在调用线程上等。
+    ///
+    /// 供"切设备/重选设备"用:早先是 Build(一批评) + 同步 Dispose,
+    /// 换一台设备要等旧连接最长 2 秒,现场就是"点一下卡两秒"。
+    /// </summary>
+    public async Task DropAllAsync()
+    {
+        List<DevicePipeline> all;
+
+        lock (_lock)
+        {
+            all = _pipelines.Values.ToList();
+            _pipelines.Clear();
+        }
+
+        foreach (var p in all) await p.ReleaseAsync().ConfigureAwait(true);
     }
 
     /// <summary>启动全部流水线(不可采的设备跳过,但保留台账以便界面显示原因)。</summary>

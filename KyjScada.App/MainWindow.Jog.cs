@@ -91,13 +91,13 @@ public partial class MainWindow
             }
         }
 
-        JogGrid.ItemsSource = null;
-        JogGrid.ItemsSource = _jogRows;
+        // ObservableCollection 自己会通知界面,不再做 ItemsSource=null 的往返
+        // (那会额外丢掉滚动位置/选中项/焦点)。
+        if (JogGrid.ItemsSource is null) JogGrid.ItemsSource = _jogRows;
 
-        JogVarBox.ItemsSource = null;
         // 下拉里显示"变量名(备注)":52 个点全是 LQB1_xxx 这种缩写,只列名字选不准
         JogVarBox.DisplayMemberPath = "Display";
-        JogVarBox.ItemsSource = _jogRows;
+        if (JogVarBox.ItemsSource is null) JogVarBox.ItemsSource = _jogRows;
         if (_jogRows.Count > 0) JogVarBox.SelectedIndex = 0;
 
         JogInfoText.Text = _jogRows.Count == 0
@@ -298,7 +298,10 @@ public partial class MainWindow
 
                 foreach (var name in names)
                 {
-                    var r = gate.Write(name, EStopValue, "estop");
+                    // 急停已经弹过一次"确认执行急停?"并列出全部点位,
+                    // 这里必须显式 confirmed:true —— 否则闸门会返回 NeedsConfirm,
+                    // 一个字节都不下发,界面却显示"成功 0/N",操作员以为急停生效了。
+                    var r = gate.Write(name, EStopValue, "estop", null, confirmed: true);
                     if (r.Success) good++;
                     else bad.Add(name + ": " + r.Message);
                 }
@@ -374,7 +377,10 @@ public partial class MainWindow
 
         try
         {
-            var r = await Task.Run(() => gate.Write(name, value, "jog")).ConfigureAwait(true);
+            // 点动就是"改开关状态",差异确认对它没有意义(0↔1 天然 100% 变化);
+            // 而闸门的不可核实/越界判定仍然生效 —— 那两类会返回 NeedsConfirm,
+            // 这里显式 confirmed:true 表示"人已经点过点动按钮了",不是绕过校验。
+            var r = await Task.Run(() => gate.Write(name, value, "jog", null, confirmed: true)).ConfigureAwait(true);
 
             JogResultText.Text = (r.Success ? "✔ " : "✘ ") + Label(row) + " " + action + ": " + r.Message;
         }

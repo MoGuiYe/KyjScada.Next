@@ -41,13 +41,23 @@ public sealed record WriteOutcome(WriteVerdict Verdict, string Message)
     /// <summary>需要确认时:是否“无法核实”(读不到当前值)。远程写入遇到它必须直接拒。</summary>
     public bool Unverifiable { get; init; }
 
+    /// <summary>需要确认时:远程(MCP)是否必须直接拒绝(值越界或无法核实)。</summary>
+    public bool BlocksRemote { get; init; }
+
     public static WriteOutcome Ok(string msg) => new(WriteVerdict.Ok, msg);
 
     public static WriteOutcome Fail(WriteVerdict v, string msg) => new(v, msg);
 
     /// <summary>可以通过,但要先让人确认。**没有任何字节被下发**。</summary>
     public static WriteOutcome Confirm(string msg, bool outOfRange, bool unverifiable = false) =>
-        new(WriteVerdict.NeedsConfirm, msg) { OutOfRange = outOfRange, Unverifiable = unverifiable };
+        new(WriteVerdict.NeedsConfirm, msg)
+        {
+            OutOfRange = outOfRange,
+            Unverifiable = unverifiable,
+
+            // 远程不能"问一句再发",只能拒或放行:值越界与无法核实必须拒
+            BlocksRemote = outOfRange || unverifiable
+        };
 }
 
 /// <summary>

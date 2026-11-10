@@ -1,4 +1,4 @@
-using KyjScada.Contracts;
+﻿using KyjScada.Contracts;
 using KyjScada.Domain.Config;
 
 namespace KyjScada.Runtime;
@@ -251,5 +251,22 @@ public sealed class DevicePipeline : IDisposable
 
         Service?.Dispose();
         _task = null;
+    }
+
+    /// <summary>
+    /// 释放,但**不在调用线程上等**。
+    ///
+    /// <see cref="Dispose"/> 里的 StopAndWait 最多阻塞 2 秒,而切设备/重读组态/
+    /// 卡死看门狗这三条路径全都跑在界面线程上 —— 现场感受就是"每换一次设备卡两秒",
+    /// 掉线时看门狗连续重建还会连续卡。
+    ///
+    /// 这里把等待放到线程池,并 await 它:**顺序仍然保证**
+    /// (先停旧循环、释放串口,再让调用方去开新连接),
+    /// 只是不再占用界面线程。顺序不能改成"后台随手释放"——
+    /// 那样新流水线会和还没放手的旧连接抢同一个 COM 口。
+    /// </summary>
+    public async Task ReleaseAsync()
+    {
+        await Task.Run(() => Dispose()).ConfigureAwait(true);
     }
 }
