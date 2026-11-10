@@ -26,7 +26,7 @@ public partial class MainWindow : Window
     private DeviceConfig _device = null;
     private readonly List<ValueRow> _rows = new List<ValueRow> ();
 
-    // 多设备并发采集:每台设备一条流水线(自己的连接/总线/报警/归档)
+    // 采集调度:同一时刻只采下拉框选中的那一台(自己的连接/总线/报警/归档)
     private AcquisitionCoordinator _coordinator = null;
     private DevicePipeline _pipeline = null;
 
@@ -109,20 +109,29 @@ public partial class MainWindow : Window
 
             BuildDeviceSelector ();
 
-            // 优先恢复上次用的设备;没有记录或该设备已不存在,再按"能采集"挑
+            // 只恢复**上次实际选过**的那台;没有记录就保持未选择,不替用户挑。
+            // “自动挑一台能采的”看起来省事,实际是把通讯对象偷偷定了下来 ——
+            // 现场换机器、换协议时谁都不知道为什么在采另一台。
             var remembered = LoadUiStateDevice ();
 
-            var preferred = devices.FirstOrDefault (d =>
-                                remembered is not null
-                                && string.Equals (d.DeviceName, remembered, StringComparison.OrdinalIgnoreCase))
-                            ?? devices.FirstOrDefault (d => AcquisitionFactory.IsCollectable (d.ProtocolKey))
-                            ?? devices[0];
+            var preferred = remembered is null
+                ? null
+                : devices.FirstOrDefault (d =>
+                      string.Equals (d.DeviceName, remembered, StringComparison.OrdinalIgnoreCase));
 
-            _switchingDevice = true;
-            DeviceBox.SelectedIndex = devices.IndexOf (preferred);
-            _switchingDevice = false;
+            if (preferred is not null)
+            {
+                _switchingDevice = true;
+                DeviceBox.SelectedIndex = devices.IndexOf (preferred) + 1;   // +1:第 0 项是"未选择"
+                _switchingDevice = false;
 
-            ApplyDevice (preferred);
+                ApplyDevice (preferred);
+            }
+            else
+            {
+                // 未选择:不建流水线、不通讯,界面给出明确引导
+                ApplyNoDevice ();
+            }
 
             // 文件多时不要把"排序第一个"当成主配置显示,会误导
             var fileText = loaded.Files.Count switch
@@ -177,11 +186,17 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 记住当前选中的设备。
+    ///
+    /// 传空字符串表示"操作员主动选了未选择"——这个选择也要记住:
+    /// 下次启动不能被程序自作主张挑一台就开始通讯。
+    /// </summary>
     private static void SaveUiState (string deviceName)
     {
         try
         {
-            File.WriteAllText (UiStateFile, "Device=" + deviceName + Environment.NewLine,
+            File.WriteAllText (UiStateFile, "Device=" + (deviceName ?? "") + Environment.NewLine,
                 new UTF8Encoding (false));
         }
         catch
@@ -216,11 +231,17 @@ public partial class MainWindow : Window
         return null;
     }
 
+    /// <summary>下拉框第 0 项:未选择设备。设备项从索引 1 开始。</summary>
+    private const int NoDeviceIndex = 0;
+
     private void BuildDeviceSelector ()
     {
         _switchingDevice = true;
 
         DeviceBox.Items.Clear ();
+
+        // 第 0 项是"未选择":设备选择本身是配置的一部分,默认不替用户决定采哪台
+        DeviceBox.Items.Add ("— 未选择设备 —");
 
         foreach (var d in _deviceList)
         {
@@ -239,9 +260,20 @@ public partial class MainWindow : Window
 
         var idx = DeviceBox.SelectedIndex;
 
-        if (idx < 0 || idx >= _deviceList.Count) return;
+        if (idx < 0) return;
 
-        ApplyDevice (_deviceList[idx], rebuildSelector: false);
+        // 选"未选择"= 停掉通讯并记住这个选择
+        if (idx == NoDeviceIndex)
+        {
+            SaveUiState ("");
+            ApplyNoDevice ();
+
+            return;
+        }
+
+        if (idx - 1 >= _deviceList.Count) return;
+
+        ApplyDevice (_deviceList[idx - 1], rebuildSelector: false);
     }
 
     /// <summary>
@@ -252,8 +284,9 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyDevice (DeviceConfig device, bool rebuildSelector = true)
     {
-        // 注意:这里**不再**释放采集服务。服务归流水线所有,
-        // 切设备只是换"看哪台",其它设备要继续采(否则就是老系统那个安全盲区)。
+        // 只采这一台:切换设备时其它设备的流水线会在 EnsurePipeline 里被停掉并释放。
+        // 每次连多台看起来"信息更全",实际是没人看的那几台在后台反复超时,
+        // 而且 485 总线并发轮询会互相打断。
         _device = device;
 
         // 记住选择,下次启动直接回到这台
@@ -391,16 +424,72 @@ public partial class MainWindow : Window
         return _coordinator;
     }
 
-    /// <summary>为指定设备取流水线(没有就建),并保证整批设备都在采。</summary>
+    /// <summary>
+    /// 为指定设备取流水线并**只启动这一台**。
+    ///
+    /// 早先是 coord.Build(_deviceList) + StartAll():配置里几台就同时采几台。
+    /// 现场要的是"上位机盯哪台就只跟哪台说话" ——
+    ///   · 一条 485 总线上挂多台时并发轮询会互相打断、大面积超时;
+    ///   · 停机检修的那台没人看,却还在后台反复超时刷错误;
+    ///   · 采集对象必须由操作员在下拉框里明确指定,不能悄悄并发。
+    ///
+    /// 所以:只保留这一台的流水线,其余全部停掉并释放(dropMissing:true 由 Build 负责)。
+    /// </summary>
     private DevicePipeline EnsurePipeline (DeviceConfig device)
     {
         var coord = EnsureCoordinator ();
 
-        coord.Build (_deviceList);
+        coord.Build (new[] { device }, null, dropMissing: true);
 
-        coord.StartAll ();
+        var pipeline = coord.Find (device.DeviceName);
 
-        return coord.Find (device.DeviceName);
+        pipeline?.Start ();
+
+        return pipeline;
+    }
+
+    /// <summary>
+    /// 没选设备时的界面状态:停掉所有采集,所有页面清空,提示去下拉框选一台。
+    /// </summary>
+    private void ApplyNoDevice ()
+    {
+        _device = null;
+
+        // 停掉全部流水线(含它们持有的串口/TCP 连接)
+        _coordinator?.StopAll ();
+        _coordinator?.Build (Array.Empty<DeviceConfig> (), null, dropMissing: true);
+
+        _pipeline = null;
+        _svc = null;
+        _alarm = null;
+        _archive = null;
+
+        // 闸门立即失效:没选设备就不该还能下发命令
+        if (_gate is not null)
+        {
+            _gate.Writer = null;
+
+            SetGateEnabled (false);
+        }
+
+        _rows.Clear ();
+        _writeRows.Clear ();
+        _jogRows.Clear ();
+
+        if (ValueGrid is not null) ValueGrid.ItemsSource = null;
+        if (WriteList is not null) WriteList.ItemsSource = null;
+        if (JogGrid is not null) JogGrid.ItemsSource = null;
+
+        _trendAllVars.Clear ();
+        _liveAllVars.Clear ();
+
+        DeviceText.Text = "未选择设备";
+        StatusText.Text = "未选择设备";
+        StatusText.Foreground = System.Windows.Media.Brushes.Goldenrod;
+
+        FooterText.Text = "请在上方「设备」下拉框里选择要监控的设备 —— 选择会记住,下次启动自动恢复。";
+
+        if (AlarmPanel is not null) AlarmPanel.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>
@@ -1894,17 +1983,18 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 启动**全部**设备的采集(不止当前这台),并挂一个界面侧状态刷新定时器。
+    /// 启动**当前选中那台**设备的采集,并挂一个界面侧状态刷新定时器。
     ///
-    /// 采集本身跑在各自的流水线线程里,这个定时器只负责把状态写到界面上,
-    /// 不在界面线程里读设备 —— 一台设备超时不会把整个窗口卡住。
+    /// 这里不再 Build(_deviceList)+StartAll():那是并发采集,现场不允许
+    /// (485 总线互相打断、没人看的设备在后台刷超时)。采哪台由下拉框决定,
+    /// 流水线的建立与启动在 ApplyDevice → EnsurePipeline 里完成。
+    ///
+    /// 这个定时器只负责把状态写到界面上,不在界面线程里读设备,
+    /// 所以设备超时不会把窗口卡住。
     /// </summary>
     private void StartAcquisition ()
     {
         if (_coordinator is null) EnsureCoordinator ();
-
-        _coordinator.Build (_deviceList);
-        _coordinator.StartAll ();
 
         if (_acqTimer is null)
         {
@@ -1952,10 +2042,10 @@ public partial class MainWindow : Window
         {
             FooterText.Text = "采集异常: " + _pipeline.LastError;
         }
-        else if (_coordinator is not null && _coordinator.Pipelines.Count > 1)
+        else if (_coordinator is not null)
         {
-            // 多设备并发时必须让操作员看见"别的设备也在采、状态如何",
-            // 否则会以为只有当前这台在跑
+            // 只采一台:状态栏就说这一台。早先这里列"并发 N 台",
+            // 现在并发已经取消,再显示会让人以为后台还连着别的设备。
             var parts = new List<string> ();
 
             foreach (var p in _coordinator.Pipelines)
@@ -1964,7 +2054,9 @@ public partial class MainWindow : Window
                     + "(" + p.LastCount + "点" + (p.Rounds > 0 ? ",第" + p.Rounds + "轮" : "") + ")");
             }
 
-            FooterText.Text = "并发采集 " + _coordinator.Pipelines.Count + " 台: " + string.Join (" | ", parts);
+            FooterText.Text = parts.Count == 0
+                ? "未选择设备(不通讯)"
+                : "当前采集: " + string.Join (" | ", parts);
         }
 
         // 报警判定与归档都在流水线线程里做,这里不再重复调用(否则会写两遍)
@@ -3431,7 +3523,7 @@ private void TickAlarmPage ()
             // 换了组态却继续用旧服务,就会出现“按旧地址发到别的寄存器、还回显写入成功”。
             // 所以这里重建这一台的流水线,闸门持有的 Writer 随之换新。
             // 闸门**实例本身保留**:Enabled、限速表、审计记录都不受影响。
-            EnsureCoordinator ().Build (_deviceList);
+            EnsureCoordinator ().Build (new[] { _device }, null, dropMissing: true);
 
             RestartService ();
 
