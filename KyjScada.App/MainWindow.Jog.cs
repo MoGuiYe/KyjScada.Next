@@ -380,7 +380,7 @@ public partial class MainWindow
             // 点动就是"改开关状态",差异确认对它没有意义(0↔1 天然 100% 变化);
             // 而闸门的不可核实/越界判定仍然生效 —— 那两类会返回 NeedsConfirm,
             // 这里显式 confirmed:true 表示"人已经点过点动按钮了",不是绕过校验。
-            var r = await Task.Run(() => gate.Write(name, value, "jog", null, confirmed: true)).ConfigureAwait(true);
+            var r = await gate.WriteAsync(name, value, "jog", null, confirmed: true).ConfigureAwait(true);
 
             JogResultText.Text = (r.Success ? "✔ " : "✘ ") + Label(row) + " " + action + ": " + r.Message;
         }

@@ -221,7 +221,34 @@ public sealed class CommandGate
     public bool Enabled { get; set; }
 
     /// <summary>实际下发用的写入器。为 null 时 Write 只能校验不能下发。</summary>
-    public IDeviceWriter? Writer { get; set; }
+    /// <summary>
+    /// 设备写入器。**必须 volatile**:
+    /// 界面线程在换设备时写它,线程池上的采集/写入线程在读它,
+    /// 普通属性没有内存屏障,读侧可能长期看到旧值(已释放的服务)。
+    /// </summary>
+    private volatile IDeviceWriter? _writer;
+
+    public IDeviceWriter? Writer
+    {
+        get => _writer;
+        set => _writer = value;
+    }
+
+    /// <summary>
+    /// 在途写入计数。释放设备前先等它归零,避免"关串口"和"正在发的那一帧"
+    /// 抢同一个句柄(表现为偶发的写入异常或串口状态错乱)。
+    /// </summary>
+    private readonly SemaphoreSlim _inFlight = new (1, 1);
+
+    /// <summary>等所有在途写入结束(最多等 timeout)。返回 false = 超时。</summary>
+    public async Task<bool> WaitForWritesAsync (TimeSpan timeout)
+    {
+        if (!await _inFlight.WaitAsync (timeout).ConfigureAwait (true)) return false;
+
+        _inFlight.Release ();
+
+        return true;
+    }
 
     /// <summary>
     /// 下发前的值判定:返回非 null 表示"要先确认",闸门就**一个字节都不发**。
@@ -306,8 +333,8 @@ public sealed class CommandGate
     /// true = 调用方已经拿 <see cref="ValueGuard"/> 的结论问过人了(或本身不需要问)。
     /// 只该在"确认框已经弹过、用户点了是"之后传 true。
     /// </param>
-    public WriteOutcome Write (string varName, double value, string moduleId = "hmi", object? rawValue = null,
-        bool confirmed = false)
+    public async Task<WriteOutcome> WriteAsync (string varName, double value, string moduleId = "hmi",
+        object? rawValue = null, bool confirmed = false)
     {
         if (!Enabled)
         {
@@ -344,7 +371,12 @@ public sealed class CommandGate
 
         // 值判定放在占用/限速之前:被要求确认的写入不该烧掉限速名额,也不该落审计条目
         // —— 它从来没发出去过。
-        if (!confirmed && ValueGuard is not null)
+        //
+        // **值判定永远要跑**,confirmed 只豁免"普通差异确认"这一种情况。
+        // 早先写成 `if (!confirmed && ...)` 整个跳过 —— 于是急停/点动/Bool 按钮
+        // 传 confirmed:true 就等于关掉了全部校验:断线(当前值不可信)、越界
+        // 都会零校验直发 PLC。这与"Bool 也要查不可核实"的设计完全相反。
+        if (ValueGuard is not null)
         {
             WriteCheck check;
 
@@ -354,11 +386,16 @@ public sealed class CommandGate
             }
             catch
             {
-                // 判定本身出错时按"要确认"处理:宁可多问一句,不可静默下发
-                check = new WriteCheck (true, true, new[] { "值判定失败,请人工确认" });
+                // 判定本身出错时按"危险且不可核实"处理:宁可拒发,不可静默下发
+                check = new WriteCheck (true, true, new[] { "值判定失败,请人工确认" })
+                    { Unverifiable = true };
             }
 
-            if (check.NeedsConfirm)
+            // 两类**任何情况都不放过**:
+            //   · OutOfRange   —— 值本身危险,哪都不能发
+            //   · Unverifiable —— 读不到当前状态,没人能担保这次下发是对的
+            // 其余(值与当前不同的普通差异)由 confirmed 表示"人已经确认过了"。
+            if (check.NeedsConfirm && (!confirmed || check.BlocksRemote))
             {
                 return WriteOutcome.Confirm (string.Join ("; ", check.Reasons), check.OutOfRange, check.Unverifiable);
             }
@@ -379,6 +416,9 @@ public sealed class CommandGate
 
             return WriteOutcome.Fail (WriteVerdict.DeviceError, "没有可用的设备写入器");
         }
+
+        // 真正发帧的这段必须与"释放设备"互斥:关串口与在途帧抢同一句柄
+        await _inFlight.WaitAsync ().ConfigureAwait (false);
 
         try
         {
@@ -404,6 +444,22 @@ public sealed class CommandGate
 
             throw;
         }
+        finally
+        {
+            // 必须释放:漏掉一次就等于永久的"有在途写入",释放设备会一直等到超时
+            _inFlight.Release ();
+        }
+    }
+
+    /// <summary>
+    /// 同步版写入。仅供不方便改异步的调用点(单测、退出路径)使用。
+    ///
+    /// **不要在界面线程上调用**:内部可能等一次完整的设备往返(断线时数秒)。
+    /// </summary>
+    public WriteOutcome Write (string varName, double value, string moduleId = "hmi", object? rawValue = null,
+        bool confirmed = false)
+    {
+        return WriteAsync (varName, value, moduleId, rawValue, confirmed).GetAwaiter ().GetResult ();
     }
 
     /// <summary>

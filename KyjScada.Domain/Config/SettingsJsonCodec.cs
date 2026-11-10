@@ -535,7 +535,14 @@ public static class SettingsJsonCodec
 
             var project = ActiveProject(projects);
 
-            if (project is null) continue;
+            if (project is null)
+            {
+                // 记 Skipped:空数组/半截 JSON 会让 ActiveProject 返回 null,
+                // 不记账的话上层只看"设备数为 0 才算失败",残缺配置照样整体替换设备列表。
+                skipped.Add(Path.GetFileName(path) + ": 没有活动项目(空数组或项目被禁用)");
+
+                continue;
+            }
 
             if (string.IsNullOrWhiteSpace(merged.ProjectName))
             {

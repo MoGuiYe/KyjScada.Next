@@ -174,7 +174,10 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             // 把"还剩多少预算"传进组内:单组多帧(>125 寄存器要分帧)时,
             // 只在组间检查是拦不住的 —— 一个组自己就能累积到几十秒,
             // 界面看门狗会把它误判成卡死,重建 + 冷却 → 慢设备反复断连。
-            successCount += CollectGroup (group, batch, sampleTime, cycleStart, cycleBudgetMs);
+            successCount += CollectGroup (group, batch, sampleTime, cycleStart, cycleBudgetMs, out var groupAborted);
+
+            // 分帧预算耗尽也要按"本轮中止"处理:否则后面会把超时原因清掉
+            if (groupAborted) aborted = true;
         }
 
         if (aborted)
@@ -263,8 +266,10 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     /// <param name="cycleBudgetMs">本轮时间预算;分帧读在每帧前都要查,超了就停。</param>
     private int CollectGroup (
         GroupConfig group, Dictionary<string, TagValue> batch, DateTime t,
-        long cycleStart, long cycleBudgetMs)
+        long cycleStart, long cycleBudgetMs, out bool aborted)
     {
+        aborted = false;
+
         var deadlineTick = cycleStart + cycleBudgetMs;
 
         var vars = group.VarList;
@@ -295,15 +300,17 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             if (fn == ModbusFunction.ReadCoils)
             {
-                raw = CoilsToWords (ReadCoilsChunked (baseOffset, length, spans, deadlineTick, out arrived));
+                var coils = ReadCoilsChunked (baseOffset, length, spans, deadlineTick, out arrived, out aborted);
+
+                raw = CoilsToWords (coils);
             }
             else if (fn == ModbusFunction.ReadInputRegisters)
             {
-                raw = ReadRegistersChunked (baseOffset, length, spans, true, deadlineTick, out arrived);
+                raw = ReadRegistersChunked (baseOffset, length, spans, true, deadlineTick, out arrived, out aborted);
             }
             else
             {
-                raw = ReadRegistersChunked (baseOffset, length, spans, false, deadlineTick, out arrived);
+                raw = ReadRegistersChunked (baseOffset, length, spans, false, deadlineTick, out arrived, out aborted);
             }
         }
         catch (Exception ex)
@@ -451,10 +458,11 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     /// </summary>
     private ushort[] ReadRegistersChunked (
         int start, int count, IReadOnlyList<(int Offset, int Length)> spans, bool input,
-        long deadlineTick, out bool[] arrived)
+        long deadlineTick, out bool[] arrived, out bool aborted)
     {
         var all = new ushort[count];
         arrived = new bool[count];
+        aborted = false;
 
         foreach (var (offset, take) in PlanChunks (count, MaxRegistersPerRead, spans))
         {
@@ -463,6 +471,10 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             if (deadlineTick > 0 && Environment.TickCount64 > deadlineTick)
             {
                 LastError ??= "本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理";
+
+                // **必须回传**:只置 LastError 是不够的 —— 外层看到"有数据"会把
+                // LastError 清成 null,状态栏显示"通讯正常"而表里一半是 --。
+                aborted = true;
 
                 break;
             }
@@ -492,16 +504,21 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     /// <summary>按协议上限分段读线圈(判定口径同 <see cref="ReadRegistersChunked"/>)。</summary>
     private bool[] ReadCoilsChunked (
         int start, int count, IReadOnlyList<(int Offset, int Length)> spans,
-        long deadlineTick, out bool[] arrived)
+        long deadlineTick, out bool[] arrived, out bool aborted)
     {
         var all = new bool[count];
         arrived = new bool[count];
+        aborted = false;
 
         foreach (var (offset, take) in PlanChunks (count, MaxCoilsPerRead, spans))
         {
             if (deadlineTick > 0 && Environment.TickCount64 > deadlineTick)
             {
                 LastError ??= "本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理";
+
+                // **必须回传**:只置 LastError 是不够的 —— 外层看到"有数据"会把
+                // LastError 清成 null,状态栏显示"通讯正常"而表里一半是 --。
+                aborted = true;
 
                 break;
             }

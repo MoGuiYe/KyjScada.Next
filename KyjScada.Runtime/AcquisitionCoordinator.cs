@@ -16,6 +16,23 @@ public sealed class AcquisitionCoordinator : IDisposable
     private readonly Dictionary<string, DevicePipeline> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
 
+    /// <summary>
+    /// 重建串行化。
+    ///
+    /// 异步重建里有一段 await(释放旧流水线),两个重建重叠时会出大问题:
+    /// 第二次建好 P_B 之后,第一次回来执行 Build(dropMissing:true) 会把 P_B
+    /// **同步 Dispose** —— 界面指向已释放的流水线、后台在采另一条,
+    /// 窗口期两条 Task 还会抢同一个 COM 口。整段重建必须互斥。
+    /// </summary>
+    private readonly SemaphoreSlim _rebuildGate = new(1, 1);
+
+    /// <summary>
+    /// 代际号:每次"全量重建"递增。
+    /// await 回来之后如果代际已经变了,说明有更新的重建在跑,本次结果直接丢弃,
+    /// 不能再去动 _pipelines(否则会把新一轮刚建好的流水线顶掉)。
+    /// </summary>
+    private int _generation;
+
     private readonly Func<DeviceConfig, IAcquisitionService?> _createService;
     private readonly Func<DeviceConfig, AlarmService?>? _createAlarm;
     private readonly Func<DeviceConfig, ArchiveService?>? _createArchive;
@@ -148,22 +165,42 @@ public sealed class AcquisitionCoordinator : IDisposable
     {
         if (string.IsNullOrWhiteSpace(device.DeviceName)) return null;
 
-        DevicePipeline? old;
+        await _rebuildGate.WaitAsync().ConfigureAwait(true);
 
-        lock (_lock)
+        try
         {
-            _pipelines.Remove(device.DeviceName, out old);
+            int generation;
+
+            DevicePipeline? old;
+
+            lock (_lock)
+            {
+                generation = _generation;
+
+                _pipelines.Remove(device.DeviceName, out old);
+            }
+
+            if (old is not null) await old.ReleaseAsync().ConfigureAwait(true);
+
+            // await 期间若有更新的重建跑过,本次结果作废:
+            // 再往下走会把新一轮刚建好的流水线当成"多余的"清掉。
+            lock (_lock)
+            {
+                if (_generation != generation) return null;
+            }
+
+            Build(new[] { device }, null, dropMissing: false);
+
+            var fresh = Find(device.DeviceName);
+
+            fresh?.Start();
+
+            return fresh;
         }
-
-        if (old is not null) await old.ReleaseAsync().ConfigureAwait(true);
-
-        Build(new[] { device }, null, dropMissing: false);
-
-        var fresh = Find(device.DeviceName);
-
-        fresh?.Start();
-
-        return fresh;
+        finally
+        {
+            _rebuildGate.Release();
+        }
     }
 
     /// <summary>
@@ -174,15 +211,27 @@ public sealed class AcquisitionCoordinator : IDisposable
     /// </summary>
     public async Task DropAllAsync()
     {
-        List<DevicePipeline> all;
+        await _rebuildGate.WaitAsync().ConfigureAwait(true);
 
-        lock (_lock)
+        try
         {
-            all = _pipelines.Values.ToList();
-            _pipelines.Clear();
-        }
+            List<DevicePipeline> all;
 
-        foreach (var p in all) await p.ReleaseAsync().ConfigureAwait(true);
+            lock (_lock)
+            {
+                // 代际 +1:此刻起,任何"还在 await 里"的旧重建都算过期
+                _generation++;
+
+                all = _pipelines.Values.ToList();
+                _pipelines.Clear();
+            }
+
+            foreach (var p in all) await p.ReleaseAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _rebuildGate.Release();
+        }
     }
 
     /// <summary>启动全部流水线(不可采的设备跳过,但保留台账以便界面显示原因)。</summary>

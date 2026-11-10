@@ -91,8 +91,11 @@ internal static class McpHost
 
                 // 绑定 127.0.0.1 只挡"从别的机器连",挡不住"本机浏览器里的恶意页面":
                 // 浏览器会给 attacker.com 解析到 127.0.0.1 再发请求(DNS rebinding),
-                // Host 头里带的是 attacker.com。所以再加一道 Host/Origin 白名单 + 可选 token。
-                var token = Environment.GetEnvironmentVariable("KYJ_MCP_TOKEN");
+                // Host 头里带的是 attacker.com。所以再加一道 Host/Origin 白名单 + token。
+                //
+                // token 默认**必须**:没配环境变量就自动生成一个并落盘,
+                // 否则本机任意进程都能借着"闸门已开启"写 PLC(见 IsAllowedRequest 的注释)。
+                var token = ResolveToken(settingsDir);
 
                 app.Use(async (ctx, next) =>
                 {
@@ -171,8 +174,57 @@ internal static class McpHost
         }
     }
 
+    /// <summary>自动生成的 token 落盘位置(供本机客户端读取)。</summary>
+    public static string TokenFile =>
+        System.IO.Path.Combine(AppContext.BaseDirectory, "data", "mcp_token.txt");
+
     /// <summary>
-    /// 请求准入:只接受"从本机回环地址、用本机主机名、且来源是本机页面"的请求。
+    /// 取本次运行使用的 token。
+    ///
+    /// 优先环境变量 KYJ_MCP_TOKEN;没配就生成一个随机值并写入 data\mcp_token.txt ——
+    /// 客户端(本机 AI 工具)读这个文件拿 token,在请求头里带
+    /// `Authorization: Bearer &lt;token&gt;`。
+    /// 显式设 KYJ_MCP_ALLOW_ANONYMOUS=1 可退回"不校验"(仅用于老客户端改不动的场合)。
+    /// </summary>
+    private static string ResolveToken(string settingsDir)
+    {
+        var configured = Environment.GetEnvironmentVariable("KYJ_MCP_TOKEN");
+
+        if (!string.IsNullOrEmpty(configured)) return configured;
+
+        if (Environment.GetEnvironmentVariable("KYJ_MCP_ALLOW_ANONYMOUS") == "1") return "";
+
+        try
+        {
+            var dir = System.IO.Path.Combine(AppContext.BaseDirectory, "data");
+
+            System.IO.Directory.CreateDirectory(dir);
+
+            var file = System.IO.Path.Combine(dir, "mcp_token.txt");
+
+            // 已有就复用:重启后客户端不必重新配置
+            if (System.IO.File.Exists(file))
+            {
+                var existing = System.IO.File.ReadAllText(file).Trim();
+
+                if (existing.Length >= 16) return existing;
+            }
+
+            var fresh = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+
+            System.IO.File.WriteAllText(file, fresh, new System.Text.UTF8Encoding(false));
+
+            return fresh;
+        }
+        catch
+        {
+            // 生成失败时**拒绝所有请求**比放行安全:放行等于任意本地进程可写 PLC
+            return "unavailable-" + Guid.NewGuid().ToString("N");
+        }
+    }
+
+    /// <summary>
+    /// 请求准入:只接受"从本机回环地址、用本机主机名、来源是本机页面、且带正确 token"的请求。
     /// </summary>
     private static bool IsAllowedRequest(HttpContext ctx, int port, string? token)
     {
@@ -200,9 +252,19 @@ internal static class McpHost
             if (!ok) return false;
         }
 
-        // token 是可选的:现场若把端口暴露给别的工具,在环境变量里设一个,
-        // 客户端带 Authorization: Bearer <token> 才放行。
-        if (string.IsNullOrEmpty(token)) return true;
+        // ==================== token 校验 ====================
+        // 早先是"没设 KYJ_MCP_TOKEN 就一路放行"。这有个真实漏洞:
+        // Host/Origin 白名单只挡浏览器发起的跨站请求(DNS rebinding),
+        // 挡不住**本机任意进程** —— 任何本地程序 curl 一下就能在闸门开启时写 PLC,
+        // 而闸门是操作员为正常作业打开的,不会为此关掉。
+        //
+        // 现在的默认:**必须带 token**。没配环境变量就自动生成一个,
+        // 落在 data\mcp_token.txt 里供本机客户端读取(文件名与值都会写进状态栏与日志)。
+        // 现场若确实需要匿名访问(例如老客户端改不动),设 KYJ_MCP_ALLOW_ANONYMOUS=1 显式退回。
+        if (string.IsNullOrEmpty(token))
+        {
+            return Environment.GetEnvironmentVariable("KYJ_MCP_ALLOW_ANONYMOUS") == "1";
+        }
 
         return FixedTimeEqualsOne(
             ctx.Request.Headers["Authorization"].ToString(),

@@ -45,6 +45,24 @@ public sealed class HistoryRepository : IHistoryRepository
     private static readonly HashSet<string> SchemaReady = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// WAL 切换的失败次数与下次重试时刻(按库文件)。
+    ///
+    /// WAL 与"建表"必须分开记账:
+    ///   · 表建好了就是建好了,不需要因为 WAL 没切成就每次重做(建表也有开销);
+    ///   · WAL 没切成功要**有限地**重试,不能无限重试 ——
+    ///     每次 PRAGMA journal_mode 都要抢库级独占锁,配合 busy_timeout=5000
+    ///     每次可能阻塞数秒,把八处 EnsureSchema 变成"每次都卡几秒"。
+    /// 所以:失败后按指数退避重试,试满 MaxWalAttempts 次就放弃(只留 LastWalError)。
+    /// </summary>
+    private static readonly Dictionary<string, (int Attempts, DateTime NextTryUtc)> WalRetry
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    private const int MaxWalAttempts = 5;
+
+    /// <summary>WAL 未能启用时的原因(诊断用;成功或未尝试时为 null)。</summary>
+    public static string? LastWalError { get; private set; }
+
+    /// <summary>
     /// 建表/改 journal_mode 的串行锁。
     ///
     /// 必须按库文件串行:journal_mode 是**库级持久设置**,切换时要求独占锁,
@@ -83,7 +101,7 @@ public sealed class HistoryRepository : IHistoryRepository
         return conn;
     }
 
-    /// <summary>建表(幂等)。首次使用时调用。</summary>
+    /// <summary>建表(幂等)。首次使用时调用。表建好之后不再重复;WAL 单独按退避重试。</summary>
     public void EnsureSchema()
     {
         lock (SchemaLock)
@@ -92,23 +110,7 @@ public sealed class HistoryRepository : IHistoryRepository
 
             using var conn = OpenConnection();
 
-            // journal_mode 只在建库时切一次(它是库级持久设置),
-            // 不要放进 OpenConnection:每条连接都切等于每次都要抢独占锁。
-            // WAL:读写并发,写不阻塞读。老库实测就是 WAL。
-            var walOk = false;
-
-            using (var pragma = conn.CreateCommand())
-            {
-                pragma.CommandText = "PRAGMA journal_mode=wal;";
-
-                // **必须看返回值**:库被别的连接占着、或老库停在 delete 模式时,
-                // 这句会"执行成功但没切过去",返回的仍是 delete。
-                // 早先把返回值丢掉就标记建表完成 —— 于是本进程**永不重试**,
-                // 一直跑在 delete 模式下读写互锁,现场表现是"偶尔写库失败,重启就好"。
-                var mode = pragma.ExecuteScalar() as string;
-
-                walOk = string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase);
-            }
+            TryEnableWal(conn);
 
             foreach (var sql in HistorySchema.AllCreateStatements)
             {
@@ -117,9 +119,74 @@ public sealed class HistoryRepository : IHistoryRepository
                 cmd.ExecuteNonQuery();
             }
 
-            // 只有真的切到 WAL 才认为"库准备好了";
-            // 没切成功就不登记,下一次调用会再试一遍(而不是永远停在 delete 模式)。
-            if (walOk) SchemaReady.Add(_dbPath);
+            // 表已经建好了,这一步不需要因为 WAL 没切成就重做
+            SchemaReady.Add(_dbPath);
+        }
+    }
+
+    /// <summary>
+    /// 尝试把库切到 WAL,失败则按指数退避安排下次重试。
+    ///
+    /// journal_mode 是库级持久设置,切换要抢独占锁 ——
+    /// 所以只在建库时做一次,而且**不能无限重试**(见 <see cref="WalRetry"/> 的注释)。
+    /// </summary>
+    private void TryEnableWal(SqliteConnection conn)
+    {
+        int attempts;
+
+        lock (SchemaLock)
+        {
+            if (WalRetry.TryGetValue(_dbPath, out var state))
+            {
+                if (state.Attempts >= MaxWalAttempts) return;
+
+                if (DateTime.UtcNow < state.NextTryUtc) return;
+
+                attempts = state.Attempts;
+            }
+            else
+            {
+                attempts = 0;
+            }
+        }
+
+        string? mode = null;
+        string? error = null;
+
+        try
+        {
+            using var pragma = conn.CreateCommand();
+            pragma.CommandText = "PRAGMA journal_mode=wal;";
+
+            // **必须看返回值**:库被别的连接占着、或老库停在 delete 模式时,
+            // 这句会"执行成功但没切过去",返回的仍是 delete。
+            mode = pragma.ExecuteScalar() as string;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        lock (SchemaLock)
+        {
+            if (string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase))
+            {
+                WalRetry.Remove(_dbPath);
+                LastWalError = null;
+
+                return;
+            }
+
+            var next = attempts + 1;
+
+            // 指数退避,封顶 60 秒
+            var delay = TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, next)));
+
+            WalRetry[_dbPath] = (next, DateTime.UtcNow + delay);
+
+            LastWalError = "未能启用 WAL(第 " + next + " 次,返回 " + (mode ?? "null") + ")"
+                + (error is null ? "" : ":" + error)
+                + (next >= MaxWalAttempts ? " —— 已达重试上限,本进程不再尝试" : ",将在 " + (int)delay.TotalSeconds + " 秒后重试");
         }
     }
 

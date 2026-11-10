@@ -310,7 +310,7 @@ public partial class MainWindow : Window
         if (idx == NoDeviceIndex)
         {
             SaveUiState ("");
-            ApplyNoDevice ();
+            _ = ApplyNoDeviceAsync ();
 
             return;
         }
@@ -374,12 +374,13 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            if (ReferenceEquals (_device, device)) FooterText.Text = "建立采集失败: " + ex.Message;
+            if (!_closing && ReferenceEquals (_device, device)) FooterText.Text = "建立采集失败: " + ex.Message;
 
             return;
         }
 
-        if (!ReferenceEquals (_device, device)) return;
+        // 窗口已关 / 用户又切了设备:放弃本次结果
+        if (_closing || !ReferenceEquals (_device, device)) return;
 
         _pipeline = pipeline;
         _svc = pipeline?.Service;
@@ -543,6 +544,8 @@ public partial class MainWindow : Window
 
         if (device is null) return;
 
+        if (_closing) return;
+
         DiagUi ("pipeline rebuild: " + reason);
 
         // 重建前先摘掉 Writer:在途写入不能打到即将释放的旧服务上
@@ -561,7 +564,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!ReferenceEquals (_device, device)) return;
+        if (_closing || !ReferenceEquals (_device, device)) return;
 
         _pipeline = pipeline;
         _svc = pipeline?.Service;
@@ -588,11 +591,28 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyNoDevice ()
     {
+        _ = ApplyNoDeviceAsync ();
+    }
+
+    /// <summary>
+    /// 同上,但释放旧流水线不占界面线程。
+    ///
+    /// 早先是同步 Build(dropMissing:true),内部 Dispose 最长等 2 秒 —— 界面冻结;
+    /// 更糟的是如果同时有异步重建正在 await,那条流水线已经不在字典里,
+    /// 同步 Build 根本碰不到它,于是留下一条"没人持有、不显示、不停止"的幽灵流水线
+    /// 一直占着 COM 口。现在统一走 DropAllAsync(它按代际清空,能覆盖这种情况)。
+    /// </summary>
+    private async Task ApplyNoDeviceAsync ()
+    {
         _device = null;
 
-        // 停掉全部流水线(含它们持有的串口/TCP 连接)
+        // 停掉全部流水线(含它们持有的串口/TCP 连接),释放放到线程池
         _coordinator?.StopAll ();
-        _coordinator?.Build (Array.Empty<DeviceConfig> (), null, dropMissing: true);
+
+        if (_coordinator is not null)
+        {
+            await _coordinator.DropAllAsync ().ConfigureAwait (true);
+        }
 
         _pipeline = null;
         _svc = null;
@@ -670,8 +690,20 @@ public partial class MainWindow : Window
             }
         }
 
-        StartMcp ();
+        // MCP 只尝试启动一次:
+        // EnsureDatabases 在 OnLoaded 与每次 ApplyDevice 都会被调到,
+        // 每次都 StartMcp 会重复写页脚、重复起后台 Task(Kestrel 自身幂等,
+        // 不会起两个监听,但界面提示会被反复覆盖)。
+        if (!_mcpAttempted)
+        {
+            _mcpAttempted = true;
+
+            StartMcp ();
+        }
     }
+
+    /// <summary>内嵌 MCP 是否已经尝试启动过(本进程内只试一次)。</summary>
+    private bool _mcpAttempted;
 
     // ==================== 内嵌 MCP ====================
 
@@ -2307,6 +2339,18 @@ public partial class MainWindow : Window
         Environment.GetCommandLineArgs ().Any (a => a == "--ui-diag")
         || Environment.GetEnvironmentVariable ("KYJ_UI_DIAG") == "1";
 
+    /// <summary>
+    /// 窗口正在关闭。
+    ///
+    /// 异步重建/重读组态的延续(ConfigureAwait(true))会回到界面线程,
+    /// 那时窗口可能已经关掉:定时器被重建、StartAcquisition 又跑起来、
+    /// 甚至去访问已释放的控件。所有异步延续开头都要先看这个标志。
+    /// </summary>
+    private volatile bool _closing;
+
+    /// <summary>关窗时取消所有异步重建。</summary>
+    private readonly CancellationTokenSource _closingCts = new ();
+
     /// <summary>卡死看门狗:最近一次看到的轮次/总线版本,以及"两者都不再变化"的起点。</summary>
     private int _lastRounds = -1;
     private long _lastBusVersion = -1;
@@ -3245,7 +3289,7 @@ private async void WriteBoolRow (object sender, bool on)
         // 与点动一致:Bool 就是 1.0 / 0.0,中间不存在别的取值。
         // 这里显式 confirmed:true —— "写1(开)/写0(关)"按钮本身就是人的确认动作,
         // 不再为"值与当前不同"二次弹框;越界与无法核实仍由闸门拦下(返回 NeedsConfirm)。
-        result = await Task.Run (() => gate.Write (name, on ? 1.0 : 0.0, "hmi", null, confirmed: true))
+        result = await gate.WriteAsync (name, on ? 1.0 : 0.0, "hmi", null, confirmed: true)
             .ConfigureAwait (true);
     }
     catch (Exception ex)
@@ -3368,7 +3412,7 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
         // 而且按钮会永远停在 disabled —— 这里兜住并把原因显示出来。
         try
         {
-            result = await Task.Run (() => gate.Write (name, value, "hmi")).ConfigureAwait (true);
+            result = await gate.WriteAsync (name, value, "hmi").ConfigureAwait (true);
         }
         catch (Exception ex)
         {
@@ -3404,7 +3448,7 @@ private async void OnWriteRow (object sender, RoutedEventArgs e)
 
         try
         {
-            result = await Task.Run (() => gate.Write (name, value, "hmi", null, confirmed: true)).ConfigureAwait (true);
+            result = await gate.WriteAsync (name, value, "hmi", null, confirmed: true).ConfigureAwait (true);
         }
         catch (Exception ex)
         {
@@ -3764,26 +3808,38 @@ private void TickAlarmPage ()
             // 换了组态却继续用旧服务,就会出现“按旧地址发到别的寄存器、还回显写入成功”。
             // 所以这里重建这一台的流水线,闸门持有的 Writer 随之换新。
             // 闸门**实例本身保留**:Enabled、限速表、审计记录都不受影响。
+            var reconnected = false;
+
             if (_device is not null)
             {
                 if (_gate is not null) _gate.Writer = null;
 
-                await RestartServiceAsync ();
+                reconnected = await RestartServiceAsync ();
             }
             else
             {
                 // 未选设备:没有流水线可重建,保持"不通讯"状态即可
                 // (早先这里会 Build(new[]{null}) 直接空引用,整个重读被 catch 吞成失败)
-                ApplyNoDevice ();
+                await ApplyNoDeviceAsync ();
             }
 
             // 闸门若是第一次建(从没打开过参数设置页),这里补建一次。
             // preserveGate:true —— 重读组态**不能**动写入许可,
             // 否则"关一下配置编辑器"就等于把写入静默关掉,而提示还写着"许可保持原状态"。
-            BuildWritePage (preserveGate: true);
-            BuildJogPage ();
+            //
+            // **只在重建成功时**重建页面:失败时 _svc 已被清空,
+            // 拿它建页会把已释放的旧服务重新挂回 _gate.Writer。
+            if (reconnected)
+            {
+                BuildWritePage (preserveGate: true);
+                BuildJogPage ();
+            }
 
-            FooterText.Text = "配置已重新读取并重连采集:写入页/点动页按新组态刷新,写入许可保持原状态。";
+            FooterText.Text = _device is null
+                ? "配置已重新读取。当前未选择设备,不进行通讯 —— 请在上方「设备」下拉框里选择。"
+                : reconnected
+                    ? "配置已重新读取并重连采集:写入页/点动页按新组态刷新,写入许可保持原状态。"
+                    : "配置已重新读取,但重连采集失败:未建立连接,写入已停用。请检查设备/串口后重选设备。";
         }
         catch (Exception ex)
         {
@@ -3842,6 +3898,19 @@ private void TickAlarmPage ()
 
     private async void OnOrderChanged (object sender, SelectionChangedEventArgs e)
     {
+        // async void 里没有 catch 会直接终止进程:这里必须兜住
+        try
+        {
+            await OnOrderChangedCore (sender, e);
+        }
+        catch (Exception ex)
+        {
+            if (!_closing) FooterText.Text = "切换字节序失败: " + ex.Message;
+        }
+    }
+
+    private async Task OnOrderChangedCore (object sender, SelectionChangedEventArgs e)
+    {
         if  (_device is null) return;
 
         var idx = OrderBox.SelectedIndex;
@@ -3863,11 +3932,15 @@ private void TickAlarmPage ()
             fileName = Path.GetFileName (filePath);
         }
 
-        await RestartServiceAsync ();
+        var reconnected = await RestartServiceAsync ();
 
-        FooterText.Text = saved
+        var prefix = saved
             ? "字节序已设为 " + OrderName (order) + ",并已保存到 " + fileName
             : "字节序已设为 " + OrderName (order) + "(未能写回配置文件,下次启动会恢复)";
+
+        FooterText.Text = reconnected
+            ? prefix
+            : prefix + " —— 但重建连接失败,采集未启动,写入已停用";
     }
 
     private static string OrderName (WordOrder o)
@@ -3886,11 +3959,18 @@ private void TickAlarmPage ()
     ///
     /// 异步:旧流水线的 StopAndWait 最长 2 秒,同步做会让"改一次字节序卡两秒"。
     /// </summary>
-    private async Task RestartServiceAsync ()
+    /// <returns>true = 新连接已建立;false = 未建立(调用方**不能**拿旧服务重建页面)。</returns>
+    private async Task<bool> RestartServiceAsync ()
     {
         var device = _device;
 
-        if (device is null) return;
+        if (device is null)
+        {
+            // 未选设备:没有可重建的对象,把引用彻底清干净
+            ClearReleasedService ();
+
+            return false;
+        }
 
         // 重建前先摘掉 Writer:在途写入不能打到即将释放的旧服务上
         if (_gate is not null) _gate.Writer = null;
@@ -3909,24 +3989,45 @@ private void TickAlarmPage ()
         {
             FooterText.Text = "重建连接失败: " + ex.Message;
 
-            // 失败时 Writer 保持 null:宁可让写入被闸门拒绝,
-            // 也不能继续指向已经释放的旧服务(否则下发必崩)。
-            return;
+            // 失败时把引用清干净 —— 继续持有已 Dispose 的服务,
+            // 后面 BuildWritePage 会把 _gate.Writer 又挂回那个废对象上,
+            // 结果是"按旧地址发到别的寄存器"或者直接崩。
+            ClearReleasedService ();
+
+            return false;
         }
 
-        if (!ReferenceEquals (_device, device)) return;
+        // 期间用户又切了设备 / 有更新的重建跑过:本次结果作废
+        if (!ReferenceEquals (_device, device) || pipeline is null)
+        {
+            ClearReleasedService ();
 
-        _svc = pipeline?.Service;
+            return false;
+        }
+
+        _svc = pipeline.Service;
+        _pipeline = pipeline;
+        _bus = pipeline.Bus;
+        _alarm = pipeline.Alarm;
+        _archive = pipeline.Archive;
 
         if (_gate is not null) _gate.Writer = _svc as IDeviceWriter;
 
-        if (pipeline is not null)
-        {
-            _pipeline = pipeline;
-            _bus = pipeline.Bus;
-            _alarm = pipeline.Alarm;
-            _archive = pipeline.Archive;
-        }
+        return true;
+    }
+
+    /// <summary>
+    /// 连接已释放后把界面引用清干净。
+    ///
+    /// 只置 _gate.Writer=null 是不够的:BuildWritePage 会拿 _svc 重新挂回 Writer,
+    /// 于是"清空"被下一次建页抵消掉。_svc/_pipeline 必须一起清。
+    /// </summary>
+    private void ClearReleasedService ()
+    {
+        _svc = null;
+        _pipeline = null;
+
+        if (_gate is not null) _gate.Writer = null;
     }
     /// <summary>按变量类型格式化。Bool 不显示 0.00/1.00,整数不带小数位。</summary>
     private static string FormatValue (double v, string varType)
@@ -3973,6 +4074,12 @@ private void TickAlarmPage ()
 
     private void OnClosed (object sender, EventArgs e)
     {
+        // 先立标志再停定时器:在途的异步重建延续会据此直接放弃,
+        // 不会在窗口关掉之后又把采集/定时器拉起来。
+        _closing = true;
+
+        try { _closingCts.Cancel (); } catch { /* 关窗路径上不抛 */ }
+
         // 先停界面定时器,再停各设备流水线;采集服务由流水线负责释放
         if (_acqTimer != null) { _acqTimer.Stop (); _acqTimer = null; }
 

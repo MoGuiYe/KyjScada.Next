@@ -145,10 +145,23 @@ public static class CommandGateAuditTests
             TestHelpers.AssertTrue(blocked.OutOfRange, "越限要标出来");
             TestHelpers.AssertEq(0, gate.Audit.Count, "没下发的写入不该留下审计条目");
 
-            // 限速名额也不能被“被拒的写入”烧掉:确认后应当立刻能发
+            // **越界在 confirmed 之后仍然不能发** —— 这是本轮修掉的安全倒退:
+            // 早先 confirmed:true 会跳过整个值判定,急停/点动/Bool 都传 true,
+            // 于是断线/越界时零校验直发 PLC。
+            var stillBlocked = gate.Write("SET1", 88, "hmi", null, confirmed: true);
+
+            TestHelpers.AssertTrue(stillBlocked.Verdict == KyjScada.Runtime.WriteVerdict.NeedsConfirm,
+                "越界不能靠 confirmed 绕过,实际:" + stillBlocked.Verdict);
+            TestHelpers.AssertEq(0, sent, "越界时一个字节都不能发");
+
+            // 换一个"只是差异"的判定:确认后应当能发,且限速名额没被烧掉
+            gate.ValueGuard = (name, value) => value > 40
+                ? new KyjScada.Runtime.WriteCheck(true, false, new[] { "当前值 30 → 将写入 88" })
+                : KyjScada.Runtime.WriteCheck.Pass;
+
             var ok = gate.Write("SET1", 88, "hmi", null, confirmed: true);
 
-            TestHelpers.AssertTrue(ok.Success, "用户确认后应放行,实际:" + ok.Message);
+            TestHelpers.AssertTrue(ok.Success, "普通差异确认后应放行,实际:" + ok.Message);
             TestHelpers.AssertEq(1, sent, "确认后应真的下发一次");
         });
 
@@ -180,6 +193,51 @@ public static class CommandGateAuditTests
             TestHelpers.AssertTrue(unknown.Verdict == KyjScada.Runtime.WriteVerdict.UnknownVar,
                 "未知变量应先被拦,实际:" + unknown.Verdict);
             TestHelpers.AssertEq(0, asked, "未知变量不该走值判定");
+        });
+
+        run("值判定:confirmed 只豁免差异确认,越界与不可核实照样拦(端到端过闸门)", () =>
+        {
+            var gate = MakeGate(out _);
+            var sent = 0;
+
+            gate.Writer = new FakeWriter(v => { sent++; return true; }, null);
+
+            // 越界:confirmed:true 也必须拦
+            gate.ValueGuard = (name, value) => new KyjScada.Runtime.WriteCheck(
+                true, true, new[] { "⚠ 超出写入上限 40" });
+
+            var over = gate.Write("SET1", 88, "hmi", null, confirmed: true);
+
+            TestHelpers.AssertTrue(over.Verdict == KyjScada.Runtime.WriteVerdict.NeedsConfirm,
+                "越界时 confirmed 不能放行,实际:" + over.Verdict);
+            TestHelpers.AssertTrue(over.BlocksRemote, "越界要标记远程也必须拒");
+            TestHelpers.AssertEq(0, sent, "越界时一个字节都不能发");
+
+            // 不可核实:confirmed:true 也必须拦(急停/点动/Bool 都走这条路)
+            gate.ValueGuard = (name, value) => new KyjScada.Runtime.WriteCheck(
+                true, false, new[] { "⚠ 读不到当前值" }) { Unverifiable = true };
+
+            var unknown = gate.Write("SET1", 1, "hmi", null, confirmed: true);
+
+            TestHelpers.AssertTrue(unknown.Verdict == KyjScada.Runtime.WriteVerdict.NeedsConfirm,
+                "不可核实时 confirmed 不能放行,实际:" + unknown.Verdict);
+            TestHelpers.AssertEq(0, sent, "不可核实时一个字节都不能发");
+
+            // 普通差异:confirmed:true 才放行
+            gate.ValueGuard = (name, value) => new KyjScada.Runtime.WriteCheck(
+                true, false, new[] { "当前值 1 → 将写入 2" });
+
+            var diff = gate.Write("SET1", 2, "hmi", null, confirmed: true);
+
+            TestHelpers.AssertTrue(diff.Success, "普通差异在 confirmed 后应放行,实际:" + diff.Message);
+            TestHelpers.AssertEq(1, sent, "普通差异确认后应真的下发一次");
+
+            // 未确认时普通差异要被拦下(界面据此弹框)
+            var blocked = gate.Write("SET1", 3, "hmi");
+
+            TestHelpers.AssertTrue(blocked.Verdict == KyjScada.Runtime.WriteVerdict.NeedsConfirm,
+                "普通差异未确认时应当返回 NeedsConfirm");
+            TestHelpers.AssertEq(1, sent, "被拦下的写入不能再发");
         });
 
     }

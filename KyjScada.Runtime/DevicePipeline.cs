@@ -70,6 +70,16 @@ public sealed class DevicePipeline : IDisposable
     private Task? _task;
     private readonly object _lifecycle = new();
 
+    /// <summary>
+    /// 已释放。
+    ///
+    /// Dispose 超时后循环可能**还卡在一次同步读里**,等它恢复时:
+    ///   · 会继续往旧 Bus 里 Publish,写出一份"设备已释放之后"的假快照;
+    ///   · 还会继续跑报警/归档,把假值写进库。
+    /// 所以循环在发布前必须查这个标志,看到就立刻退出。
+    /// </summary>
+    private volatile bool _released;
+
     public DevicePipeline(
         DeviceConfig device,
         IValueBus bus,
@@ -177,6 +187,13 @@ public sealed class DevicePipeline : IDisposable
                     State = "未连接";
                 }
 
+                // 已释放:不能再发布 —— 否则会写出一份"设备已释放之后"的假快照,
+                // 并连带触发报警/归档,把假值落进库
+                if (_released)
+                {
+                    break;
+                }
+
                 // 报警与归档都用同一个快照,避免两次取快照拿到不同版本
                 var snap = Bus.GetSnapshot();
                 LastSnapshot = snap;
@@ -239,6 +256,9 @@ public sealed class DevicePipeline : IDisposable
 
     public void Dispose()
     {
+        // 先立标志再停:卡住的读一旦恢复,循环看到它会直接退出,不再发布假数据
+        _released = true;
+
         // 超时也要继续往下走:关闭 Service 的句柄正是打断"卡在半途的同步读"的手段。
         // 但要把情况记下来,别让现场以为是自己点了停止。
         if (!StopAndWait(TimeSpan.FromSeconds(2)))
@@ -250,7 +270,29 @@ public sealed class DevicePipeline : IDisposable
         _cts = null;
 
         Service?.Dispose();
-        _task = null;
+
+        // **保留 _task**:置 null 会把"循环异常退出"这件事彻底埋掉 ——
+        // 异常没人观察、IsRunning 变成假阴性(任务还在跑却报"没在跑")。
+        // 这里只在任务确实已结束时才清掉引用,并观察它的异常。
+        var task = _task;
+
+        if (task is not null && task.IsCompleted)
+        {
+            try
+            {
+                task.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                // 取消是预期路径
+            }
+            catch (Exception ex)
+            {
+                LastError = "采集循环异常退出: " + ex.GetBaseException().Message;
+            }
+
+            _task = null;
+        }
     }
 
     /// <summary>

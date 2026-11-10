@@ -1267,7 +1267,10 @@ private static List<List<string>> SplitCsvRecords(string text)
         {
             var sb = new System.Text.StringBuilder();
 
-            sb.Append("设备,协议,组,变量名,类型,地址,单位,缩放,偏移,归档,上限,上限启用,下限,下限启用,死区,备注\n");
+            // 写入上下限必须一起导出:CSV 是配置的维护通道之一,
+            // 漏掉这两列会导致"导出→改→导入"之后写入保护静默丢失(变回未配置)。
+            sb.Append("设备,协议,组,变量名,类型,地址,单位,缩放,偏移,归档,上限,上限启用,下限,下限启用,死区,"
+                + "写入下限,写入上限,备注\n");
 
             foreach (var d in project.AllDevices())
             {
@@ -1292,6 +1295,11 @@ private static List<List<string>> SplitCsvRecords(string text)
                           .Append(v.LowAlarmValue.ToString(CultureInfo.InvariantCulture)).Append(',')
                           .Append(v.LowAlarmEnable ? "是" : "否").Append(',')
                           .Append(v.AlarmDeadband.ToString(CultureInfo.InvariantCulture)).Append(',')
+                          // 留空 = 未配置(与 0 区分开)
+                          .Append(v.WriteLowLimit.HasValue
+                              ? v.WriteLowLimit.Value.ToString(CultureInfo.InvariantCulture) : "").Append(',')
+                          .Append(v.WriteHighLimit.HasValue
+                              ? v.WriteHighLimit.Value.ToString(CultureInfo.InvariantCulture) : "").Append(',')
                           .Append(Csv(v.Comments)).Append('\n');
                     }
                 }
