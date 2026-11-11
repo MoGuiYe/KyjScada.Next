@@ -88,7 +88,21 @@ public partial class MainWindow : Window
         };
     }
 
-    private void OnLoaded (object sender, RoutedEventArgs e)
+    private async void OnLoaded (object sender, RoutedEventArgs e)
+    {
+        // async void 事件处理器:异常必须自己兜住,否则直接终止进程
+        try
+        {
+            await OnLoadedCore ();
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = "启动失败";
+            FooterText.Text = ex.Message;
+        }
+    }
+
+    private async Task OnLoadedCore ()
     {
         try
         {
@@ -143,8 +157,9 @@ public partial class MainWindow : Window
             }
             else
             {
-                // 未选择:不建流水线、不通讯,界面给出明确引导
-                ApplyNoDevice ();
+                // 未选择:不建流水线、不通讯,界面给出明确引导。
+                // **必须 await**:OnLoaded 已改成 async,不再走同步包装器。
+                await ApplyNoDeviceAsync ();
             }
 
             // 文件多时不要把"排序第一个"当成主配置显示,会误导
@@ -298,7 +313,20 @@ public partial class MainWindow : Window
         return NoDeviceIndex;
     }
 
-    private void OnDeviceChanged (object sender, SelectionChangedEventArgs e)
+    private async void OnDeviceChanged (object sender, SelectionChangedEventArgs e)
+    {
+        // async void 里没有 catch 会直接终止进程 —— 事件处理器必须兜住
+        try
+        {
+            await OnDeviceChangedCore (sender, e);
+        }
+        catch (Exception ex)
+        {
+            if (!_closing) FooterText.Text = "切换设备失败: " + ex.Message;
+        }
+    }
+
+    private async Task OnDeviceChangedCore (object sender, SelectionChangedEventArgs e)
     {
         if (_switchingDevice) return;
 
@@ -306,11 +334,13 @@ public partial class MainWindow : Window
 
         if (idx < 0) return;
 
-        // 选"未选择"= 停掉通讯并记住这个选择
+        // 选"未选择"= 停掉通讯并记住这个选择。
+        // **必须 await**:fire-and-forget 会与紧接着的选设备重建赛跑 ——
+        // DropAllAsync 可能在新流水线建好之后才执行,把它清掉并释放。
         if (idx == NoDeviceIndex)
         {
             SaveUiState ("");
-            _ = ApplyNoDeviceAsync ();
+            await ApplyNoDeviceAsync ();
 
             return;
         }
@@ -471,6 +501,17 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds (1)
         };
 
+        // 释放流水线前先等闸门里在途的写帧收尾。
+        // 每次调用都重新读 _gate:闸门可能被重建(换设备/重读组态)。
+        _coordinator.BeforeRelease = async timeout =>
+        {
+            var gate = _gate;
+
+            if (gate is null) return true;
+
+            return await gate.WaitForWritesAsync (timeout).ConfigureAwait (true);
+        };
+
         // 报警落库在采集线程里发生:这里只做仓储写入,不碰界面
         _coordinator.AlarmSink = events =>
         {
@@ -589,11 +630,6 @@ public partial class MainWindow : Window
     /// <summary>
     /// 没选设备时的界面状态:停掉所有采集,所有页面清空,提示去下拉框选一台。
     /// </summary>
-    private void ApplyNoDevice ()
-    {
-        _ = ApplyNoDeviceAsync ();
-    }
-
     /// <summary>
     /// 同上,但释放旧流水线不占界面线程。
     ///
@@ -642,7 +678,12 @@ public partial class MainWindow : Window
         StatusText.Text = "未选择设备";
         StatusText.Foreground = System.Windows.Media.Brushes.Goldenrod;
 
-        FooterText.Text = "请在上方「设备」下拉框里选择要监控的设备 —— 选择会记住,下次启动自动恢复。";
+        // 只有真的还是"未选设备"才写引导:否则会覆盖 OnLoaded 刚拼好的配置摘要
+        // (异步释放的延续比同步的摘要拼接晚落地)。
+        if (_device is null && !_closing)
+        {
+            FooterText.Text = "请在上方「设备」下拉框里选择要监控的设备 —— 选择会记住,下次启动自动恢复。";
+        }
 
         if (AlarmPanel is not null) AlarmPanel.Visibility = Visibility.Collapsed;
     }
@@ -690,6 +731,17 @@ public partial class MainWindow : Window
             }
         }
 
+        // WAL 没启用成功要让现场看得见:它不会让功能立刻坏掉,
+        // 但会在"归档线程写、界面/MCP 读"并发时表现为偶发写库失败。
+        var walError = HistoryRepository.LastWalError;
+
+        if (walError is not null)
+        {
+            DiagUi ("history db wal: " + walError);
+
+            if (!_closing) FooterText.Text = "历史库警告: " + walError;
+        }
+
         // MCP 只尝试启动一次:
         // EnsureDatabases 在 OnLoaded 与每次 ApplyDevice 都会被调到,
         // 每次都 StartMcp 会重复写页脚、重复起后台 Task(Kestrel 自身幂等,
@@ -734,7 +786,7 @@ public partial class MainWindow : Window
         // 若无条件覆盖,会把同时写下的"请选择设备"这类操作引导顶掉
         // (首启实测:页脚只剩 MCP 状态,用户看不到该干什么)。
         // 所以:启动成功**不动页脚**(状态在「系统设置」里可查),只有失败才占用它。
-        FooterText.Text = "MCP 正在启动…";
+        FooterText.Text = "MCP 正在启动…(token 文件:data\\mcp_token.txt)";
 
         Task.Run (() =>
         {
@@ -804,7 +856,22 @@ public partial class MainWindow : Window
     {
         try
         {
-            return Dispatcher.Invoke (() =>
+            // 在**调用线程**(MCP 的 HTTP 线程)上做,不要 Dispatcher.Invoke:
+            // 写入可能等一次完整的设备往返(断线时数秒),放进 UI 线程就是整窗冻结,
+            // 而 CommandGate.Write 的注释本来就写着"不要在界面线程上调用"。
+            // 只有最后更新文本框那一步才回 UI。
+            return WriteFromMcpThread (varName, value);
+        }
+        catch (Exception ex)
+        {
+            return "失败:" + ex.Message;
+        }
+    }
+
+    private string WriteFromMcpThread (string varName, double value)
+    {
+        try
+        {
             {
                 if (_gate is null) return "拒绝:写闸门尚未构建(请先打开「参数设置」页)。";
 
@@ -853,7 +920,7 @@ public partial class MainWindow : Window
                 return outcome.Success
                     ? "OK " + varName + " = " + value + "(" + outcome.Message + ")"
                     : "拒绝:" + outcome.Message;
-            });
+            }
         }
         catch (Exception ex)
         {
@@ -2348,8 +2415,6 @@ public partial class MainWindow : Window
     /// </summary>
     private volatile bool _closing;
 
-    /// <summary>关窗时取消所有异步重建。</summary>
-    private readonly CancellationTokenSource _closingCts = new ();
 
     /// <summary>卡死看门狗:最近一次看到的轮次/总线版本,以及"两者都不再变化"的起点。</summary>
     private int _lastRounds = -1;
@@ -4077,8 +4142,6 @@ private void TickAlarmPage ()
         // 先立标志再停定时器:在途的异步重建延续会据此直接放弃,
         // 不会在窗口关掉之后又把采集/定时器拉起来。
         _closing = true;
-
-        try { _closingCts.Cancel (); } catch { /* 关窗路径上不抛 */ }
 
         // 先停界面定时器,再停各设备流水线;采集服务由流水线负责释放
         if (_acqTimer != null) { _acqTimer.Stop (); _acqTimer = null; }

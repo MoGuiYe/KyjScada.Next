@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -1140,7 +1140,20 @@ private void OnImportVars(object sender, RoutedEventArgs e)
         if (f.Count > 12 && ParseFinite (f[12], out var lo)) v.LowAlarmValue = lo;
         if (f.Count > 13) v.LowAlarmEnable = f[13].Trim() is "是" or "1" or "true" or "True";
         if (f.Count > 14 && ParseFinite (f[14], out var db)) v.AlarmDeadband = db;
-        if (f.Count > 15 && f[15].Trim().Length > 0) v.Comments = f[15].Trim();
+        // 列序必须与导出一致(见下方导出表头 18 列):
+        //   15=写入下限 16=写入上限 17=备注
+        // 早先这里把 f[15] 当备注 —— 导出→导入一轮,写入下限被写进备注、两个写入限全丢。
+        if (f.Count > 15 && f[15].Trim().Length > 0)
+        {
+            if (ParseFinite (f[15], out var wlo)) v.WriteLowLimit = wlo;
+        }
+        else v.WriteLowLimit = null;
+        if (f.Count > 16 && f[16].Trim().Length > 0)
+        {
+            if (ParseFinite (f[16], out var whi)) v.WriteHighLimit = whi;
+        }
+        else v.WriteHighLimit = null;
+        if (f.Count > 17 && f[17].Trim().Length > 0) v.Comments = f[17].Trim();
     }
 
     MarkDirty();

@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using KyjScada.Contracts;
 using KyjScada.Domain.History;
 using Microsoft.Data.Sqlite;
@@ -63,6 +63,21 @@ public sealed class HistoryRepository : IHistoryRepository
     public static string? LastWalError { get; private set; }
 
     /// <summary>
+    /// 该库是否还有"待重试的 WAL 切换"。
+    ///
+    /// 表建好之后 EnsureSchema 本来可以直接返回,但只要 WAL 还没切成功、
+    /// 且没到重试上限,就得再进来一次 —— 否则 TryEnableWal 的退避形同虚设,
+    /// 实际只尝试一次,失败就永远停在 delete 模式(读写互锁)。
+    /// </summary>
+    private static bool WalPending(string dbPath)
+    {
+        lock (SchemaLock)
+        {
+            return WalRetry.TryGetValue(dbPath, out var state) && state.Attempts < MaxWalAttempts;
+        }
+    }
+
+    /// <summary>
     /// 建表/改 journal_mode 的串行锁。
     ///
     /// 必须按库文件串行:journal_mode 是**库级持久设置**,切换时要求独占锁,
@@ -106,11 +121,18 @@ public sealed class HistoryRepository : IHistoryRepository
     {
         lock (SchemaLock)
         {
-            if (SchemaReady.Contains(_dbPath)) return;
+            var schemaDone = SchemaReady.Contains(_dbPath);
+
+            // 表已建好但 WAL 还没切成功:必须再进来一次去重试 WAL。
+            // 早先这里一律 return,于是 TryEnableWal 的指数退避与 MaxWalAttempts
+            // 永远不会被触发 —— 实际上只尝试一次,失败就永远停在 delete 模式。
+            if (schemaDone && !WalPending(_dbPath)) return;
 
             using var conn = OpenConnection();
 
             TryEnableWal(conn);
+
+            if (schemaDone) return;
 
             foreach (var sql in HistorySchema.AllCreateStatements)
             {

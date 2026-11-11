@@ -1,4 +1,4 @@
-﻿using KyjScada.Contracts;
+using KyjScada.Contracts;
 using KyjScada.Domain.Config;
 
 namespace KyjScada.Runtime;
@@ -79,6 +79,16 @@ public sealed class DevicePipeline : IDisposable
     /// 所以循环在发布前必须查这个标志,看到就立刻退出。
     /// </summary>
     private volatile bool _released;
+
+    /// <summary>
+    /// 释放前等待在途写入结束的钩子(由持有 CommandGate 的一侧注入)。
+    ///
+    /// 为什么需要:Writer 置 null 只能挡住"之后"的写入,已经进入
+    /// WriteVariable 的那一帧仍会继续用串口句柄 —— 此时 Dispose 掉 Service,
+    /// 两者就抢同一个句柄(现场表现是偶发"写入失败"或串口异常)。
+    /// 这个钩子让释放方先等那一帧收尾,再关连接。
+    /// </summary>
+    public Func<TimeSpan, Task<bool>>? InFlightWait { get; set; }
 
     public DevicePipeline(
         DeviceConfig device,
@@ -309,6 +319,24 @@ public sealed class DevicePipeline : IDisposable
     /// </summary>
     public async Task ReleaseAsync()
     {
+        // 先等闸门里的在途写结束:Dispose 会关串口句柄,
+        // 而正在发帧的那一帧正握着同一个句柄 —— 抢起来就是"写入偶发失败/串口异常"。
+        // 等待有超时,超时就照旧释放:宁可丢一次写,也不能让界面卡在释放上。
+        var wait = InFlightWait;
+
+        if (wait is not null)
+        {
+            try
+            {
+                await wait(TimeSpan.FromSeconds(3)).ConfigureAwait(true);
+            }
+            catch
+            {
+                // 等待本身失败不影响释放
+            }
+        }
+
         await Task.Run(() => Dispose()).ConfigureAwait(true);
     }
+
 }

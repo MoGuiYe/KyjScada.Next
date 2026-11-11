@@ -1,4 +1,4 @@
-﻿using KyjScada.Contracts;
+using KyjScada.Contracts;
 using KyjScada.Domain.Config;
 
 namespace KyjScada.Runtime;
@@ -52,6 +52,16 @@ public sealed class AcquisitionCoordinator : IDisposable
 
     public TimeSpan Interval { get; set; } = TimeSpan.FromSeconds(1);
 
+    /// <summary>
+    /// 释放流水线**之前**要等的动作(由界面注入:等命令闸门里在途的写帧结束)。
+    ///
+    /// 为什么必须有:释放的最后一步是 <c>Service.Dispose()</c>,它会关掉串口句柄。
+    /// 若此刻正好有一帧写在下发途中,关句柄与那帧读回抢同一个句柄 ——
+    /// 结果是写结果不明、串口状态错乱。`Writer = null` 挡不住已经进入
+    /// <c>WriteVariable</c> 的那一帧,只有"等它结束"才行。
+    /// </summary>
+    public Func<TimeSpan, Task<bool>>? BeforeRelease { get; set; }
+
     /// <summary>报警事件落库回调(所有设备共用)。</summary>
     public Func<IReadOnlyList<AlarmEvent>, int>? AlarmSink { get; set; }
 
@@ -100,7 +110,10 @@ public sealed class AcquisitionCoordinator : IDisposable
                     svc is null ? "该协议 v1 不采集" : null)
                 {
                     Interval = Interval,
-                    AlarmSink = AlarmSink
+                    AlarmSink = AlarmSink,
+                    // 释放这条流水线前,先等命令闸门里在途的那一帧写结束 ——
+                    // Service.Dispose() 会关串口句柄,与正在发帧的写抢同一个句柄。
+                    InFlightWait = BeforeRelease
                 };
 
                 _pipelines[device.DeviceName] = pipeline;
