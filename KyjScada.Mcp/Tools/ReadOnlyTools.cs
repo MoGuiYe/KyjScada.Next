@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Globalization;
 using KyjScada.Mcp.Data;
 using ModelContextProtocol.Server;
@@ -356,14 +356,26 @@ public sealed class ReadOnlyTools
         if (e < s) return "时间范围错误:结束时间早于开始时间。";
 
         List<LogRow> logs;
+        string? readError;
         try
         {
-            logs = _db.QueryLogs(s, e, logType, limit);
+            logs = _db.QueryLogs(s, e, out readError, logType, limit);
         }
         catch (Exception ex)
         {
             // 采集正在高频写库时,读连接可能被锁:给出可读原因,而不是让协议层报未知错误
             return $"查询失败: {ex.Message}";
+        }
+
+        // 底层 catch 住异常时只会返回"已读到的部分",空表也可能意味着**读不出来**。
+        // 不把原因说清,AI 会把"库读不了"当成"没有报警",结论正好相反。
+        if (!string.IsNullOrEmpty(readError))
+        {
+            var partial = logs.Count == 0
+                ? "报警库读取失败,无法确认是否有报警(不要据此判断为无报警)"
+                : "报警库读取部分失败,以下结果可能不完整";
+
+            return partial + ":" + readError;
         }
 
         var sText = s.ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture);

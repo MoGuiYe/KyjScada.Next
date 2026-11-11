@@ -1,4 +1,4 @@
-using KyjScada.Contracts;
+﻿using KyjScada.Contracts;
 using KyjScada.Domain.History;
 using KyjScada.Infrastructure.Alarm;
 using KyjScada.Infrastructure.Data;
@@ -211,6 +211,113 @@ public static class McpDbReaderTests
                 var rows = db.QueryLogs(at, at);
 
                 TestHelpers.AssertEq(1, rows.Count, "端点上的报警不能因为时区形状不同被排除");
+            }
+            finally
+            {
+                TryDelete(dir);
+            }
+        });
+
+        run("MCP 数据层:同一秒内的不同报警不能被去重丢掉(去重键含类型与值)", () =>
+        {
+            var dir = Path.Combine(WorkDir(), "mcp_db_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+
+            try
+            {
+                var historyPath = Path.Combine(dir, "history.db");
+                var alarmPath = Path.Combine(dir, "alarms.db");
+
+                new HistoryRepository(historyPath).EnsureSchema();
+
+                var alarmRepo = new AlarmRepository(alarmPath);
+                alarmRepo.EnsureSchema();
+
+                // 同一秒里:同变量的高限触发、低限触发、以及一次消除
+                var t0 = new DateTime(2026, 11, 6, 8, 0, 0);
+
+                alarmRepo.WriteEvents(new[]
+                {
+                    new AlarmEvent("LQT_Level", AlarmDirection.High, AlarmLevel.Normal, AlarmLevel.Active, 55, t0),
+                    new AlarmEvent("LQT_Level", AlarmDirection.Low, AlarmLevel.Normal, AlarmLevel.Active, 4, t0),
+                    new AlarmEvent("LQT_Level", AlarmDirection.High, AlarmLevel.Active, AlarmLevel.Normal, 50, t0),
+                });
+
+                var db = new DbReader(historyPath);
+
+                var rows = db.QueryLogs(new DateTime(2026, 11, 6), new DateTime(2026, 11, 7));
+
+                TestHelpers.AssertEq(3, rows.Count,
+                    "同一秒的高限/低限/消除是三条不同事件,不能合并成一条");
+
+                TestHelpers.AssertEq(1, rows.Count(r => r.LogType == "消除"), "消除事件要留下");
+                TestHelpers.AssertEq(1, rows.Count(r => r.AlarmType == "低限"), "低限事件要留下");
+                TestHelpers.AssertEq(1, rows.Count(r => r.AlarmType == "高限" && r.LogType == "报警"),
+                    "高限触发要留下");
+            }
+            finally
+            {
+                TryDelete(dir);
+            }
+        });
+
+        run("MCP 数据层:老库单运算符脏值(1+2/1-2)不能混进统计", () =>
+        {
+            var dir = Path.Combine(WorkDir(), "mcp_db_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+
+            try
+            {
+                var dbPath = Path.Combine(dir, "legacy.db");
+
+                // 手工造一个"老库":ActualData 宽表,数值列是 TEXT
+                using (var conn = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + dbPath))
+                {
+                    conn.Open();
+
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = "CREATE TABLE ActualData (ID INTEGER PRIMARY KEY, InsertTime TEXT, VAL TEXT)";
+                        cmd.ExecuteNonQuery();
+                    }
+
+                    // 合法值 10、20;脏值:1+2、1-2、--、1e999
+                    var rows = new[]
+                    {
+                        ("2026-11-06 10:00:00", "10"),
+                        ("2026-11-06 10:00:10", "20"),
+                        ("2026-11-06 10:00:20", "1+2"),
+                        ("2026-11-06 10:00:30", "1-2"),
+                        ("2026-11-06 10:00:40", "--"),
+                        ("2026-11-06 10:00:50", "1e999"),
+                        ("2026-11-06 10:01:00", "-1.5e-3"),
+                    };
+
+                    foreach (var (tm, v) in rows)
+                    {
+                        using var ins = conn.CreateCommand();
+                        ins.CommandText = "INSERT INTO ActualData (InsertTime, VAL) VALUES ($t, $v)";
+                        ins.Parameters.AddWithValue("$t", tm);
+                        ins.Parameters.AddWithValue("$v", v);
+                        ins.ExecuteNonQuery();
+                    }
+                }
+
+                var db = new DbReader(dbPath);
+
+                TestHelpers.AssertTrue(!db.IsNewSchema, "应识别为老库");
+
+                var stat = db.QueryStat("VAL", new DateTime(2026, 11, 6), new DateTime(2026, 11, 7));
+
+                TestHelpers.AssertTrue(stat is not null, "应能统计出结果");
+
+                // 只有 10、20、-1.5e-3 是合法数值:
+                //   '1+2'/'1-2' 会被 CAST 成 1.0、'--' 变 0、'1e999' 变 Inf —— 必须全排除
+                TestHelpers.AssertEq(3, (int)stat!.Count, "只应统计 3 个合法数值");
+                TestHelpers.AssertTrue(stat.Min.HasValue && Math.Abs(stat.Min.Value - (-0.0015)) < 1e-9,
+                    "最小值应是 -1.5e-3,实际 " + stat.Min);
+                TestHelpers.AssertTrue(stat.Max.HasValue && Math.Abs(stat.Max.Value - 20) < 1e-9,
+                    "最大值应是 20,实际 " + stat.Max);
             }
             finally
             {

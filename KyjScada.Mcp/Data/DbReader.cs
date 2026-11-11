@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 
 namespace KyjScada.Mcp.Data;
 
@@ -320,6 +320,11 @@ public sealed class DbReader
             // 正负号规则要认得**指数**:老库里有 '-1.5e-3'、'1E+5' 这类合法写法,
             // 早先一句 NOT GLOB '*[-+]*[-+]*' 把凡是带两个符号的都当脏值,
             // 负指数整类被漏掉(统计少算);而 '1e999'、'5-' 又能混进去(CAST 成 Inf/截断)。
+            // 去掉指数里的正负号,只留"数字/小数点/eE"和可能的前导符号,
+            // 用来判断符号是否出现在非法位置(见下面的说明)。
+            var s = "REPLACE(REPLACE(REPLACE(REPLACE(" + q
+                + ", 'e-', ''), 'E-', ''), 'e+', ''), 'E+', '')";
+
             var strict =
                 " AND TRIM(" + q + ") = " + q +                                   // 不许首尾空格
                 " AND " + q + " NOT GLOB '*[^0-9eE+.-]*'" +                        // 只允许数字/指数/正负号/小数点
@@ -327,9 +332,17 @@ public sealed class DbReader
                 " AND " + q + " GLOB '*[0-9]'" +                                  // 结尾必须是数字(挡 '5-'、'1.5e-')
                 " AND " + q + " NOT GLOB '*[.]*[.]*'" +                            // 不许两个小数点
                 " AND " + q + " NOT GLOB '*[eE]*[eE]*'" +                          // 不许两个指数符号
-                " AND (" + q + " NOT GLOB '*[-+]*[-+]*'" +                         // 一个正负号:随便
-                "      OR (" + q + " GLOB '[+-][0-9]*[eE][+-][0-9]*'" +            // 两个正负号:只允许 "-1.5e-3"
-                "          AND " + q + " NOT GLOB '*[-+]*[-+]*[-+]*'))" +          // 三个以上一律脏值
+                // 正负号**只能出现在开头,或紧跟 e/E**(指数符号)。
+                // 早先只数"符号个数不超过两个",于是 '1+2'、'1-2' 这种也放过 ——
+                // CAST('1+2' AS REAL) 在 SQLite 里取到 1.0,这类脏值会静默混进
+                // MIN/MAX/AVG,统计看着正常其实全是假的。
+                //
+                // GLOB 做不到"看前一个字符",所以先把指数符号剥掉再判:
+                //   s = 去掉 'e-'/'E-'/'e+'/'E+' 之后的串
+                //   合法 ⟺ s 里没有符号,或者只有开头一个符号
+                " AND ((" + s + " NOT GLOB '*[-+]*')" +
+                "      OR (" + s + " GLOB '[+-]*'" +
+                "          AND SUBSTR(" + s + ", 2) NOT GLOB '*[-+]*'))" +
                 " AND ABS(CAST(" + q + " AS REAL)) <= 1e308";                      // 挡 '1e999' 这类溢出成 Inf 的
 
             cmd.CommandText =
@@ -360,22 +373,51 @@ public sealed class DbReader
     /// </summary>
     public List<LogRow> QueryLogs(DateTime start, DateTime end, string? logType = null, int limit = 500)
     {
+        return QueryLogs(start, end, out _, logType, limit);
+    }
+
+    /// <summary>
+    /// 同上,并把读取失败的原因带出来。
+    ///
+    /// 为什么必须带 error:底层 catch 住异常只返回"已读到的部分",
+    /// 调用方看到的是一张空表 —— AI 会把它当成"当前没有报警",
+    /// 而不是"报警库读不出来"。这两种结论对现场的含义完全相反:
+    /// 前者可以放心继续查,后者必须先去修库。
+    /// </summary>
+    public List<LogRow> QueryLogs(
+        DateTime start, DateTime end, out string? error, string? logType = null, int limit = 500)
+    {
         var rows = new List<LogRow>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        var errors = new List<string>();
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
 
         if (_isNew)
         {
             // 两处都读:历史库(老的新版迁移库可能带 AlarmEvents) + 同目录 alarms.db(现行写法)
-            var fromHistory = ReadAlarmEvents(_connectionString, start, end, limit);
+            var fromHistory = ReadAlarmEvents(_connectionString, start, end, limit, out var e1);
             var sidecar = SidecarAlarmConnectionString();
-            var fromAlarmDb = sidecar == null ? new List<LogRow>() : ReadAlarmEvents(sidecar, start, end, limit);
+
+            string? e2 = null;
+
+            var fromAlarmDb = sidecar == null
+                ? new List<LogRow>()
+                : ReadAlarmEvents(sidecar, start, end, limit, out e2);
+
+            if (e1 is not null) errors.Add("历史库: " + e1);
+            if (e2 is not null) errors.Add("报警库: " + e2);
 
             foreach (var row in fromHistory.Concat(fromAlarmDb))
             {
-                var key = row.InsertTime + "|" + row.VarName + "|" + row.AlarmType;
+                // 去重键必须带**类型(触发/消除)**与**值**。
+                // 早先只有 "时间|变量|方向",而 InsertTime 粒度只到秒 ——
+                // 同一秒里触发了高限、又触发了另一个值的点,后一条会被当成重复丢掉。
+                var key = row.InsertTime + "|" + row.VarName + "|" + row.AlarmType
+                    + "|" + row.LogType + "|" + row.AlarmValue + "|" + row.Note;
+
                 if (!seen.Add(key)) continue;
+
                 rows.Add(row);
             }
 
@@ -410,6 +452,8 @@ public sealed class DbReader
                     reader.IsDBNull(8) ? null : Convert.ToString(reader.GetValue(8))));
             }
         }
+
+        error = errors.Count == 0 ? null : string.Join("; ", errors);
 
         return rows;
     }
@@ -470,9 +514,12 @@ public sealed class DbReader
     }
 
     /// <summary>从指定库里读 AlarmEvents;表不存在返回空表(不抛)。</summary>
-    private static List<LogRow> ReadAlarmEvents(string connectionString, DateTime start, DateTime end, int limit)
+    private static List<LogRow> ReadAlarmEvents(
+        string connectionString, DateTime start, DateTime end, int limit, out string? error)
     {
         var rows = new List<LogRow>();
+        error = null;
+
         try
         {
             using var conn = new SqliteConnection(connectionString);
@@ -513,9 +560,11 @@ public sealed class DbReader
                     dir));
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // 库被独占锁住/文件损坏时不要炸掉整个工具调用,返回已读到的部分
+            // 库被独占锁住/文件损坏时不要炸掉整个工具调用,返回已读到的部分。
+            // 但**必须记下原因**:否则上层只看到空表,把这当成"没有报警"。
+            error = ex.GetBaseException().Message;
         }
 
         return rows;
