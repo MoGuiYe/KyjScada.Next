@@ -98,11 +98,32 @@ public static class Program
         // (本进程里的)写工具一起放到网络上。Clear 之后只剩下面这一条回环地址。
         app.Urls.Clear();
         app.Urls.Add($"http://127.0.0.1:{port}");
+
+        // 准入判定与内嵌版(App/McpHost)共用同一份实现 —— 早先这里什么都没挂:
+        // 同一个"只读库 + 写工具"的服务,换个启动方式就对本机任意进程开放。
+        var token = McpAccessGuard.ResolveToken(TokenFile);
+
+        McpAccessGuard.Use(app, port, token);
+
         app.MapMcp("/mcp");
 
         Console.WriteLine($"MCP server: http://127.0.0.1:{port}/mcp");
+
+        if (!string.IsNullOrEmpty(token))
+        {
+            Console.WriteLine($"token 文件: {TokenFile}(请求头 Authorization: Bearer <token>)");
+        }
+        else
+        {
+            Console.WriteLine("WARN: 未启用 token(KYJ_MCP_ALLOW_ANONYMOUS=1),本机任意进程均可调用");
+        }
+
         await app.RunAsync();
     }
+
+    /// <summary>独立版 token 落盘位置(与内嵌版同一约定:BaseDirectory\data\mcp_token.txt)。</summary>
+    private static string TokenFile =>
+        Path.Combine(AppContext.BaseDirectory, "data", "mcp_token.txt");
 
     private static string GetArg(string[] args, string name, string fallback)
     {

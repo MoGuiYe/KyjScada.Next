@@ -112,21 +112,21 @@ public static class DevicePipelineTests
                 Interval = TimeSpan.FromMilliseconds(20)
             };
 
-            var added1 = coord.Build(new[] { Dev("d1"), Dev("d2") });
+            var added1 = coord.BuildAsync(new[] { Dev("d1"), Dev("d2") }).GetAwaiter().GetResult();
             var p1 = coord.Find("d1");
 
             TestHelpers.AssertEq(2, added1.Count, "首次应建 2 条");
             TestHelpers.AssertTrue(p1 != null, "应能按名字找到");
 
             // 再建一次(配置刷新):已存在的不能重建,否则会把在线连接掐掉
-            var added2 = coord.Build(new[] { Dev("d1"), Dev("d2"), Dev("d3") });
+            var added2 = coord.BuildAsync(new[] { Dev("d1"), Dev("d2"), Dev("d3") }).GetAwaiter().GetResult();
 
             TestHelpers.AssertEq(1, added2.Count, "只应新增 d3");
             TestHelpers.AssertTrue(ReferenceEquals(p1, coord.Find("d1")), "d1 应保持原实例");
             TestHelpers.AssertEq(3, coord.Pipelines.Count, "台账应有 3 条");
 
             // 移除 d2
-            coord.Build(new[] { Dev("d1"), Dev("d3") });
+            coord.BuildAsync(new[] { Dev("d1"), Dev("d3") }).GetAwaiter().GetResult();
 
             TestHelpers.AssertTrue(coord.Find("d2") is null, "d2 应被回收");
             TestHelpers.AssertEq(2, coord.Pipelines.Count, "台账应剩 2 条");
@@ -138,7 +138,7 @@ public static class DevicePipelineTests
         {
             var coord = new AcquisitionCoordinator(d => null) { Interval = TimeSpan.FromMilliseconds(20) };
 
-            coord.Build(new[] { Dev("x") });
+            coord.BuildAsync(new[] { Dev("x") }).GetAwaiter().GetResult();
             var started = coord.StartAll();
             var p = coord.Find("x");
 
@@ -156,7 +156,7 @@ public static class DevicePipelineTests
                 Interval = TimeSpan.FromMilliseconds(25)
             };
 
-            coord.Build(new[] { Dev("m1"), Dev("m2") });
+            coord.BuildAsync(new[] { Dev("m1"), Dev("m2") }).GetAwaiter().GetResult();
 
             TestHelpers.AssertEq(2, coord.StartAll(), "应启动 2 条");
             Thread.Sleep(120);

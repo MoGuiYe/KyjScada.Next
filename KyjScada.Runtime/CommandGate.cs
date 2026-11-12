@@ -1,5 +1,6 @@
 using KyjScada.Contracts;
 using KyjScada.Domain.Config;
+using KyjScada.Domain.Users;
 
 namespace KyjScada.Runtime;
 
@@ -27,7 +28,10 @@ public enum WriteVerdict
     DeviceError = 6,
 
     /// <summary>值本身没被拒,但和当前状态不一致,需要人工确认后才下发。</summary>
-    NeedsConfirm = 7
+    NeedsConfirm = 7,
+
+    /// <summary>当前账号没有该模块所需的权限(没有 CanWrite/CanJog/CanForce)。</summary>
+    Denied = 8
 }
 
 /// <summary>一次写入的结果。</summary>
@@ -144,6 +148,14 @@ public sealed class CommandGate
     public string? TryEnter (string tagName, string moduleId, object? value, out long auditId)
     {
         auditId = 0;
+
+        // 权限也必须在这里查:TryEnter 是 public 的,模块可以绕过 WriteAsync 直接调它。
+        // 放在 lock 外面是故意的 —— Authorizer 是外部注入的委托,
+        // 不在持锁时调用外部代码。
+        var noPermission = CheckPermission (moduleId);
+
+        if (noPermission is not null) return noPermission;
+
         lock (_lock)
         {
             // 总开关也要在这里查:模块可以绕过 Write 直接调 TryEnter,
@@ -216,9 +228,69 @@ public sealed class CommandGate
 
     /// <summary>
     /// 写入总开关。**默认关闭**:没拿到授权前不应该能写设备。
-    /// 权限位(CanJog / CanForce)接进来之后由用户管理控制它。
+    /// 它只是"人有没有把下发总闸门打开",不是权限判定 —— 权限见 <see cref="Authorizer"/>。
     /// </summary>
     public bool Enabled { get; set; }
+
+    /// <summary>
+    /// 权限判定入口(由界面/宿主注入)。
+    ///
+    /// 为 null 表示"这次没有用户体系"(单元测试、无登录的嵌入场景),此时只受
+    /// <see cref="Enabled"/> 约束 —— 与 ValueGuard 同一口径。
+    ///
+    /// 注入之后**每一个**下发入口都要过这里,而不是靠各页面自己记得判:
+    /// 写入口有六个(参数设置数值行 / Bool 按钮 / 点动 / 急停 / 报警复位 / MCP 远程写),
+    /// 少判一处就是一个"没有权限也能让设备动作"的洞。之前确实如此:
+    /// 界面只判了 CanWrite、急停只判 CanJog、MCP 通道根本不看登录态,
+    /// 而 CanForce 在全仓没有一处校验。
+    /// </summary>
+    public Func<PermissionBit, bool>? Authorizer { get; set; }
+
+    /// <summary>
+    /// 模块 → 该模块下发所需的权限位。
+    ///
+    /// 为什么按模块分级:写"设定值"、点动、急停/强制写的危险程度完全不同。
+    /// 急停是整片写 0、强制写绕过逻辑,都必须 CanForce(只给管理员);
+    /// 没登记的模块一律按最常规的 CanWrite 处理,不给自己开特权。
+    /// </summary>
+    public Dictionary<string, PermissionBit> ModulePermissions { get; } =
+        new (StringComparer.OrdinalIgnoreCase)
+        {
+            ["hmi"] = PermissionBit.CanWrite,
+            ["mcp"] = PermissionBit.CanWrite,
+            ["jog"] = PermissionBit.CanJog,
+            ["estop"] = PermissionBit.CanForce,
+            ["force"] = PermissionBit.CanForce
+        };
+
+    /// <summary>该模块有没有下发权限。返回 null = 通过,否则是拒绝原因。</summary>
+    private string? CheckPermission (string? moduleId)
+    {
+        var authorizer = Authorizer;
+
+        // 没有用户体系:不判(单测/嵌入场景行为与以前一致)
+        if (authorizer is null) return null;
+
+        var need = moduleId is not null && ModulePermissions.TryGetValue (moduleId, out var bit)
+            ? bit
+            : PermissionBit.CanWrite;
+
+        bool ok;
+
+        try
+        {
+            ok = authorizer (need);
+        }
+        catch
+        {
+            // 判定本身出错按"无权限"处理:宁可拒发,不可静默下发
+            ok = false;
+        }
+
+        return ok
+            ? null
+            : "写拒绝:模块 " + moduleId + " 需要「" + PermissionNames.Of (need) + "」权限,当前账号没有。";
+    }
 
     /// <summary>实际下发用的写入器。为 null 时 Write 只能校验不能下发。</summary>
     /// <summary>
@@ -228,26 +300,159 @@ public sealed class CommandGate
     /// </summary>
     private volatile IDeviceWriter? _writer;
 
+    /// <summary>
+    /// 接上/摘掉设备写入器。**只改引用,不清故障标记**。
+    ///
+    /// 早先这里"接到任意非 null 值就 ClearWriteStuck",于是换设备/重读组态的建页路径
+    /// (BuildWritePage 无条件 _gate.Writer = _svc as IDeviceWriter)只要在重建完成前
+    /// 跑一次,就会把**仍然卡死的旧服务**重新挂回来,顺手抹掉"写入卡死"标记 ——
+    /// 自愈被无声抵消,现场表现依旧是"写什么都等十秒然后失败"。
+    ///
+    /// 故障标记只由 <see cref="WriterConfirmed"/> 清除:调用方必须**亲眼确认**
+    /// 手里这个写入器是这一次刚建出来的新连接(重建成功)才行。
+    ///
+    /// 反过来也有个陷阱:卡死后该字段为空,若这里"值非 null 就一律接上",
+    /// 建页路径就会把已作废的那条旧服务重新接回来 —— 那一帧会直接打到
+    /// 一个**没人采、句柄已关**的连接上。所以:
+    ///   · 已因卡死摘掉 Writer 之后,<see cref="WriterConfirmed"/> 是**唯一**入口,
+    ///     这里接到非 null 一律**拒收并保持 null**(写入继续立刻失败,等重建);
+    ///   · 没有卡死时,setter 只做换引用(释放旧嫁接、接新来的)。
+    /// 把门禁放在闸门里而不是靠每个调用方记得判 WriteStuck ——
+    /// 建页路径有六处写入口,漏一处就是把卡死的服务接回去。
+    /// </summary>
     public IDeviceWriter? Writer
     {
         get => _writer;
-        set => _writer = value;
+
+        set
+        {
+            // 卡死状态下任何人拿普通 setter 重新挂上来都不足信(它没经过重建成功)。
+            // 只允许"摘掉"(null):否则保留原状,免得 BuildWritePage 把废服务挂回。
+            if (WriteStuck && value is not null) return;
+
+            _writer = value;
+        }
+    }
+
+    /// <summary>
+    /// 接上一个**已确认是重建产物**的写入器:置引用并清掉"写入卡死"标记。
+    ///
+    /// 只有重建成功的路径该调它 —— 界面/宿主知道这个实例是这一次新建出来的,
+    /// 而不是台账里那条卡死的旧流水线。值为 null 时等同于 <see cref="Writer"/> 置空
+    /// (重建失败也就谈不上"已排除故障",标记保留)。
+    /// </summary>
+    public void WriterConfirmed (IDeviceWriter? writer)
+    {
+        _writer = writer;
+
+        if (writer is not null) ClearWriteStuck ();
     }
 
     /// <summary>
     /// 在途写入计数。释放设备前先等它归零,避免"关串口"和"正在发的那一帧"
     /// 抢同一个句柄(表现为偶发的写入异常或串口状态错乱)。
+    ///
+    /// **不是 readonly**:判定"这一帧已经卡死"之后必须换成一把新的,
+    /// 否则卡死的那一帧永远不 Release,这把信号量会被永久占用 ——
+    /// 之后每一次写都要等满 WriteSendTimeout 才失败(见 DeclareWriteStuck)。
     /// </summary>
-    private readonly SemaphoreSlim _inFlight = new (1, 1);
+    private SemaphoreSlim _inFlight = new (1, 1);
+
+    /// <summary>
+    /// 是否已判定"写入卡死"(0=正常,1=已判定)。用 int 是为了能原子地"只报一次"。
+    /// 卡死意味着**设备句柄已经不可信**,只有重建连接才可能恢复。
+    /// </summary>
+    private int _writeStuck;
+
+    /// <summary>写入是否已判定卡死(界面/看门狗据此提示与重建)。</summary>
+    public bool WriteStuck => Volatile.Read (ref _writeStuck) != 0;
+
+    /// <summary>判定卡死的时刻(诊断用)。</summary>
+    public DateTime? WriteStuckAt { get; private set; }
+
+    /// <summary>判定卡死的原因(诊断用)。</summary>
+    public string? WriteStuckReason { get; private set; }
+
+    /// <summary>
+    /// 判定"写入卡死"时触发(参数是原因)。宿主**必须**据此重建该设备的连接:
+    /// 卡在同步往返里的那一帧只有关掉句柄才能打断,闸门自己做不到。
+    /// 回调在写入线程上同步触发,**不要**在里面做耗时动作。
+    /// </summary>
+    public Action<string>? WriteStuckDetected { get; set; }
+
+    /// <summary>
+    /// 等待"在途写入"结束的上限。串口/TCP 单次往返通常几百毫秒,
+    /// 这里给足余量(含断线重试),但要有个头 —— 否则一次卡死的写会永久堵住所有写入。
+    /// </summary>
+    public TimeSpan WriteSendTimeout { get; set; } = TimeSpan.FromSeconds (10);
 
     /// <summary>等所有在途写入结束(最多等 timeout)。返回 false = 超时。</summary>
     public async Task<bool> WaitForWritesAsync (TimeSpan timeout)
     {
-        if (!await _inFlight.WaitAsync (timeout).ConfigureAwait (true)) return false;
+        // 先取到局部:判定卡死会换掉 _inFlight,两次读之间被换掉的话
+        // 会去等一把已经作废的信号量(白等满超时)。
+        var inFlight = _inFlight;
 
-        _inFlight.Release ();
+        if (!await inFlight.WaitAsync (timeout).ConfigureAwait (true)) return false;
+
+        inFlight.Release ();
 
         return true;
+    }
+
+    /// <summary>
+    /// 判定"上一次写入已经卡死",并做能自愈的准备。
+    ///
+    /// 为什么不能只把本次调用判失败:WriteVariable 是同步阻塞调用(串口/TCP 往返),
+    /// 卡住的那一帧**永不返回**,于是 _inFlight 被永久占住 ——
+    ///   · 之后每一次写都要等满 WriteSendTimeout(10 秒)才失败,
+    ///     现场表现是"程序还活着,但写什么都要等十秒然后失败";
+    ///   · WaitForWritesAsync 每次都超时,释放流水线永远等不到"写完了";
+    ///   · Writer 还指着那个卡死的服务,下次写继续卡。
+    /// 没有自愈,就只能重启程序。
+    ///
+    /// 这里做三件事:
+    ///   1. 摘掉 Writer:后续写入立刻得到"没有可用的设备写入器",
+    ///      不再陪那个卡死的帧一起等满超时;
+    ///   2. 换一把新的在途信号量:卡死的那一帧永远不会 Release 旧的那把,
+    ///      换掉它单写者才能重新工作(旧的那把留给那个线程自己收尾,不 Dispose,
+    ///      免得它稍后回来 Release 时撞 ObjectDisposedException);
+    ///   3. 标记闸门故障并通知宿主重建连接 —— 关句柄是唯一能打断阻塞往返的手段。
+    /// </summary>
+    private void DeclareWriteStuck (string varName, SemaphoreSlim held, TimeSpan waited)
+    {
+        // 1. 摘 Writer(直接写字段:走属性会被"接上新写入器"的解释带偏,这里根本不是重建)
+        _writer = null;
+
+        // 2. 换信号量。CompareExchange 保证只有还看着**这一把**的线程才换,
+        //    避免多个超时线程各换各的,把"单写者串行化"拆掉。
+        Interlocked.CompareExchange (ref _inFlight, new SemaphoreSlim (1, 1), held);
+
+        // 3. 只报一次:否则卡死期间每一次写都会再触发一次重建
+        if (Interlocked.Exchange (ref _writeStuck, 1) != 0) return;
+
+        WriteStuckAt = DateTime.Now;
+
+        WriteStuckReason = "写入 " + varName + " 超过 "
+            + waited.TotalSeconds.ToString ("0.#") + " 秒未返回,判定该设备写入已卡死";
+
+        try
+        {
+            WriteStuckDetected?.Invoke (WriteStuckReason);
+        }
+        catch
+        {
+            // 宿主回调出错不能反过来影响写路径(它已经在故障处理里了)
+        }
+    }
+
+    /// <summary>清除"写入卡死"标记。接上新写入器时自动调用(见 <see cref="Writer"/>)。</summary>
+    private void ClearWriteStuck ()
+    {
+        Interlocked.Exchange (ref _writeStuck, 0);
+
+        WriteStuckAt = null;
+        WriteStuckReason = null;
     }
 
     /// <summary>
@@ -341,6 +546,14 @@ public sealed class CommandGate
             return WriteOutcome.Fail (WriteVerdict.Disabled, "写入未启用(需授权后开启)");
         }
 
+        // 权限先于其它一切判定:没权限的人连"值是否可疑"都不该被问到
+        var noPermission = CheckPermission (moduleId);
+
+        if (noPermission is not null)
+        {
+            return WriteOutcome.Fail (WriteVerdict.Denied, noPermission);
+        }
+
         if (string.IsNullOrWhiteSpace (varName))
         {
             return WriteOutcome.Fail (WriteVerdict.UnknownVar, "变量名为空");
@@ -410,19 +623,44 @@ public sealed class CommandGate
             return WriteOutcome.Fail (WriteVerdict.Rejected, rejected);
         }
 
-        if (Writer is null)
+        // 只读一次 Writer 到局部变量:它是 volatile,界面线程换设备时会置 null,
+        // 读两次之间被清掉的话,下面的判空通过、真正调用时却是空引用
+        // (会被 catch 记成"设备写入失败",但真实原因是设备刚被释放,信息误导)。
+        var writer = Writer;
+
+        if (writer is null)
         {
             MarkOutcome (auditId, false);
 
             return WriteOutcome.Fail (WriteVerdict.DeviceError, "没有可用的设备写入器");
         }
 
-        // 真正发帧的这段必须与"释放设备"互斥:关串口与在途帧抢同一句柄
-        await _inFlight.WaitAsync ().ConfigureAwait (false);
+        // 真正发帧的这段必须与"释放设备"互斥:关串口与在途帧抢同一句柄。
+        //
+        // **必须带超时**:Writer.WriteVariable 是同步阻塞调用(串口/TCP 往返),
+        // 驱动异常时可能永不返回。无超时地等这把信号量,一次卡死就会让之后
+        // **所有**写入(界面/点动/急停/MCP)永久排队,HTTP 请求线程被逐个占满,
+        // 现场表现为"程序还活着但什么都写不进去"。
+        //
+        // 超时不只是"本次失败":那意味着**上一次写入是真的卡死了**(正常往返几百毫秒),
+        // 所以还要宣告故障并让宿主重建连接 —— 否则每一次写都白等满超时,永不自愈。
+        // 先取到局部:宣告故障时会换掉 _inFlight,释放时必须还给我们真正持有的那一把。
+        var inFlight = _inFlight;
+
+        if (!await inFlight.WaitAsync (WriteSendTimeout).ConfigureAwait (false))
+        {
+            MarkOutcome (auditId, false);
+
+            DeclareWriteStuck (varName, inFlight, WriteSendTimeout);
+
+            return WriteOutcome.Fail (WriteVerdict.DeviceError,
+                "上一帧写入迟迟未返回(超过 " + WriteSendTimeout.TotalSeconds.ToString ("0.#")
+                + " 秒),已判定该设备写入卡死,本次未下发。已停止向该连接下发并触发重建,请稍候重试。");
+        }
 
         try
         {
-            var sent = Writer.WriteVariable (varName, value, out var error);
+            var sent = writer.WriteVariable (varName, value, out var error);
 
             if (!sent)
             {
@@ -446,8 +684,9 @@ public sealed class CommandGate
         }
         finally
         {
-            // 必须释放:漏掉一次就等于永久的"有在途写入",释放设备会一直等到超时
-            _inFlight.Release ();
+            // 必须释放:漏掉一次就等于永久的"有在途写入",释放设备会一直等到超时。
+            // 释放的是**本次真正持有的那一把**(卡死换过信号量时,旧的那把不归我们管)。
+            inFlight.Release ();
         }
     }
 

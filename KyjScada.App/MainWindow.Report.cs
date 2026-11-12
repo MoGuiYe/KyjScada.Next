@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -177,7 +177,7 @@ public partial class MainWindow
         // 不能拿进后台线程用(那边的集合不保证线程安全)。
         var units = new Dictionary<string, string> (StringComparer.OrdinalIgnoreCase);
 
-        foreach (var v in vars) units[v] = FindVarConfig (v)?.Unit ?? "";
+        foreach (var v in vars) units[v] = FindVarConfig (_device, v)?.Unit ?? "";
 
         _reportBusy = true;
         SetReportBusy (true);

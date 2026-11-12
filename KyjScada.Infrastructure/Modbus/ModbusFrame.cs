@@ -195,7 +195,8 @@ public static class ModbusFrame
     /// 解析响应帧。返回 (功能码, 数据字节)。
     /// 异常响应(功能码最高位为 1)会抛 ModbusException。
     /// </summary>
-    public static (byte Function, byte[] Data) ParseResponse(byte[] frame, ushort expectedTransactionId)
+    public static (byte Function, byte[] Data) ParseResponse(
+        byte[] frame, ushort expectedTransactionId, byte? expectedUnitId = null)
     {
         if (frame.Length < MbapHeaderLength + 1)
         {
@@ -226,6 +227,15 @@ public static class ModbusFrame
         }
 
         var function = frame[MbapHeaderLength];
+
+        // 单元号必须与请求一致。网关后面挂多个从站时,回帧的单元号是"这是哪个从站答的"
+        // 的唯一标识 —— 不校验就会把 A 从站的数据当成 B 从站发布出去(数值看着正常,其实串了设备)。
+        // 两个 RTU 传输层都校验站号,这里原先漏了。
+        if (expectedUnitId is { } unit && frame[6] != unit)
+        {
+            throw new ModbusException(
+                "单元号不匹配: 期望 " + unit + ", 实际 " + frame[6]);
+        }
 
         // 异常响应:功能码最高位置 1
         if ((function & 0x80) != 0)

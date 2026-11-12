@@ -300,7 +300,14 @@ KyjScada.Infrastructure.Tests.ConfigPersistenceTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.WritePathTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.JogPointsTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.DevicePipelineTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.CoordinatorReplaceTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.ConcurrentAcquisitionTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.WriteStuckTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.ReleaseInFlightTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.WriteAddressGuardTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.WalModeTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.HistoryIndexTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.HistoryBatchTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.UserTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.AcquisitionFactoryTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.ModbusRtuTests.RunAll(Run);
@@ -317,6 +324,8 @@ KyjScada.Infrastructure.Tests.AtomicFileWriteTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.LegacyMigratorTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.McpDbReaderTests.RunAll(Run);
 KyjScada.Infrastructure.Tests.CommandGateAuditTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.RegressionTests.RunAll(Run);
+KyjScada.Infrastructure.Tests.SingleInstanceTests.RunAll(Run);
         Run("界面行模型:129 个变量都能建行且初始为 --", () =>
         {
             var path = FindRealSettings ();

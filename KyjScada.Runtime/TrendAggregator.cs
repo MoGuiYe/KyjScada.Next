@@ -144,13 +144,17 @@ public static class TrendAggregator
         var maxDiffs = Math.Min(raw.Count - 1, 4096);
         var diffs = new double[maxDiffs];
 
-        // 等距取样,避免长序列排序开销
+        // 等距取样,避免长序列排序开销。
+        // 注意:差值跨了 stride 个采样点,后面必须**除回 stride** —— 不除的话
+        // 超过 4097 点(取样步长 >1)时中位间隔会被放大 stride 倍,
+        // 自动粒度跟着变粗,趋势曲线把真实波动抹平。
+        // (TrendStatsCalculator / TrendCsv 里同样的取样都除了,这里原先漏了)
         var stride = Math.Max(1, (raw.Count - 1) / maxDiffs);
 
         var n = 0;
         for (int i = stride; i < raw.Count && n < maxDiffs; i += stride)
         {
-            diffs[n++] = (raw[i].SampleTime - raw[i - stride].SampleTime).TotalSeconds;
+            diffs[n++] = (raw[i].SampleTime - raw[i - stride].SampleTime).TotalSeconds / stride;
         }
 
         if (n == 0) return 0;

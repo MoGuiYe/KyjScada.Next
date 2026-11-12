@@ -1,4 +1,4 @@
-﻿using KyjScada.Contracts;
+using KyjScada.Contracts;
 using KyjScada.Domain.Config;
 using KyjScada.Domain.Protocol;
 using KyjScada.Infrastructure.Modbus;
@@ -32,11 +32,16 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     public ModbusAcquisitionService (
         DeviceConfig device, IProtocolDescriptor descriptor, IModbusTransport? transport)
     {
-        // 描述符为空属于调用方 bug,必须在构造时就明确报出来,
+        // 描述符/设备为空都属于调用方 bug,必须在构造时就明确报出来,
         // 否则会在采集时炸出一个和真实原因无关的空引用,极难排查
         if (descriptor is null)
         {
             throw new ArgumentNullException (nameof (descriptor), "协议描述符不能为空");
+        }
+
+        if (device is null)
+        {
+            throw new ArgumentNullException (nameof (device), "设备配置不能为空");
         }
 
         _device = device;
@@ -84,6 +89,10 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
     /// </summary>
     public static byte StationIdOf (DeviceConfig device)
     {
+        // GroupList 可能被反序列化成 null(缺字段/写坏的手工配置),
+        // 这里不挡的话会在构造函数里直接 NRE,错误信息完全指不到配置问题。
+        if (device?.GroupList is null) return 1;
+
         foreach (var g in device.GroupList)
         {
             var start = g.Start;
@@ -111,8 +120,26 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
     public bool IsConnected => _client.IsConnected;
 
-    /// <summary>最近一次连接/读取失败原因。成功一次就清空。</summary>
+    /// <summary>最近一次连接/读取失败原因。只有**整整一轮都没失败**才会清空。</summary>
     public string? LastError { get; private set; }
+
+    /// <summary>
+    /// 本轮采集有没有记过失败原因。
+    ///
+    /// 为什么不能只看 successCount:一台设备通常有好几个组,前一组超时/短响应、
+    /// 后一组正常,successCount 就大于 0 —— 早先的收尾逻辑据此把 LastError 清成 null,
+    /// 状态栏显示"通讯正常",而表里一半是 "--"。现场看到的现象就是"说好的通讯正常,
+    /// 可一半点没数",查不出原因。
+    /// </summary>
+    private bool _roundHadError;
+
+    /// <summary>记一条失败原因并把本轮标记为"有失败"。本轮内所有记错都走它。</summary>
+    private void NoteError (string message)
+    {
+        LastError ??= message;
+
+        _roundHadError = true;
+    }
 
     public int CollectOnce (IValueBus bus, DateTime sampleTime)
     {
@@ -146,6 +173,9 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         }
 
         LastError = null;
+
+        // 新的一轮:失败标记先清掉,由本轮各组的实际结果重新置位
+        _roundHadError = false;
 
         // ==================== 整轮预算 ====================
         // 设备掉线时每个分块读都要等满超时(2 秒),4 个组就是 8 秒起步,组多/分块多时更久。
@@ -197,7 +227,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                 }
             }
 
-            LastError ??= "本轮通讯超时(超过 " + (cycleBudgetMs / 1000.0).ToString ("0.#") + " 秒),已中断其余组的采集";
+            NoteError ("本轮通讯超时(超过 " + (cycleBudgetMs / 1000.0).ToString ("0.#") + " 秒),已中断其余组的采集");
 
         }
 
@@ -210,7 +240,12 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         }
         else if (successCount == 0)
         {
-            LastError ??= "已连接但未读到任何数据(从站无响应或地址不对)";
+            NoteError ("已连接但未读到任何数据(从站无响应或地址不对)");
+        }
+        else if (_roundHadError)
+        {
+            // 本轮有组失败(超时/短响应/异常),但别的组读到了数据。
+            // 原因必须留着 —— 清掉就是"状态栏显示通讯正常、表里一半 --"。
         }
         else
         {
@@ -318,7 +353,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             // 记录原因:串口没插、从站没响应、CRC 错都会走到这里。
             // 不记的话界面只能显示"未连接",现场无从排查。
             // 同 Connect:这里也必须兜住所有异常类型,否则会跳过 Publish 留下旧值。
-            LastError ??= DescribeFailure (ex, _device);
+            NoteError (DescribeFailure (ex, _device));
 
             FailAll (vars, batch, t);
             return 0;
@@ -470,7 +505,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             // 一个组自己就能分很多帧,设备慢时累积几十秒,界面看门狗会误判成卡死。
             if (deadlineTick > 0 && Environment.TickCount64 > deadlineTick)
             {
-                LastError ??= "本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理";
+                NoteError ("本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理");
 
                 // **必须回传**:只置 LastError 是不够的 —— 外层看到"有数据"会把
                 // LastError 清成 null,状态栏显示"通讯正常"而表里一半是 --。
@@ -493,8 +528,8 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             if (got < take)
             {
-                LastError ??= "从站返回的寄存器数不足(" + got + "/" + take
-                    + "),地址 " + (start + offset) + " 之后的点按未采集处理";
+                NoteError ("从站返回的寄存器数不足(" + got + "/" + take
+                    + "),地址 " + (start + offset) + " 之后的点按未采集处理");
             }
         }
 
@@ -514,7 +549,7 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
         {
             if (deadlineTick > 0 && Environment.TickCount64 > deadlineTick)
             {
-                LastError ??= "本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理";
+                NoteError ("本轮通讯超时,地址 " + (start + offset) + " 之后的点按未采集处理");
 
                 // **必须回传**:只置 LastError 是不够的 —— 外层看到"有数据"会把
                 // LastError 清成 null,状态栏显示"通讯正常"而表里一半是 --。
@@ -534,8 +569,8 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             if (got < take)
             {
-                LastError ??= "从站返回的线圈数不足(" + got + "/" + take
-                    + "),地址 " + (start + offset) + " 之后的点按未采集处理";
+                NoteError ("从站返回的线圈数不足(" + got + "/" + take
+                    + "),地址 " + (start + offset) + " 之后的点按未采集处理");
             }
         }
 
@@ -634,8 +669,12 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
 
             abs = NormalizeOffset (seg0);
 
-            // 位号必须在 0~15,否则说明这不是位地址
-            if (parts.Length >= 2 && seg1 >= 0 && seg1 <= 15) bit = seg1;
+            // 位号必须在 0~15。超出范围**不能**当成"没有位号"继续按整寄存器读 ——
+            // 那会静默读出一个完全不相干的值(现场表现:配成 200.20 的点永远显示一个怪数,
+            // 而且配置校验报"0 问题"),必须明确判为地址非法。
+            if (seg1 < 0 || seg1 > 15) return false;
+
+            bit = seg1;
 
             return true;
         }
@@ -793,6 +832,11 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
                 break;
             default: eng = raw[0]; break;
         }
+        // Bool 是开关量,Scale/Offset 只对工程量有意义。
+        // 读侧早先也给 Bool 套了 scale+offset,而写入侧不套 —— 配了缩放的开关量
+        // 写 1 读回不是 1(点动/急停的"当前值"永远对不上,差异确认还会次次弹框)。
+        if (t == "bool") return eng;
+
         var scale = v.Scale;
         var useScale = scale == 0f ? 1f : scale;
         var result = eng * useScale + v.Offset;
@@ -869,6 +913,16 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             }
 
             if (g.VarList is null) continue;
+
+            // 16 位地址空间:组起点 + 长度越界时,运行期 CheckAddress 会抛异常,
+            // **整组一起失败**;而配置期以前不查,界面照样报"0 问题"。
+            if (baseOffset < 0 || baseOffset + length > 0x10000)
+            {
+                problems.Add ("组 " + g.GroupName + ":起始偏移 " + baseOffset + " + 长度 " + length
+                    + " 超出 Modbus 16 位地址空间");
+
+                continue;
+            }
 
             foreach (var v in g.VarList)
             {
@@ -1049,6 +1103,19 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             // 写入必须发【绝对地址】= 组基准 + 组内相对偏移。
             // 读取时 rel 只是"这块连续数据里的下标",写入时少了基准就会写到别的区 ——
             // 实测漏掉这一步会把设定值写到实时值寄存器上,现场属于严重事故。
+            //
+            // 地址必须先在 32 位里校验完再转 ushort:直接 (ushort)abs 会**静默回绕**,
+            // 组基准 65500、变量绝对偏移 65600 时会被写成地址 64 —— 完全是另一个点位。
+            // 读取路径有 CheckAddress 拦这类越界,写入路径原来一次都没查:
+            // 读错点只是错值,写错点是动错设备,性质不同。
+            if (abs < 0 || abs > ushort.MaxValue)
+            {
+                error = "变量地址越界:" + abs + " 超出 Modbus 16 位地址空间,拒绝写入"
+                    + "(直接强转会回绕到别的点位)。请检查组起始地址与变量 Start 配置";
+
+                return false;
+            }
+
             var writeAddress = (ushort)abs;
 
             if (type is "bool" or "boolean")
@@ -1097,7 +1164,17 @@ public sealed class ModbusAcquisitionService : IAcquisitionService, IDeviceWrite
             }
             else
             {
-                // Float / Int32 占 2 个寄存器,必须用功能码 16
+                // Float / Int32 占 2 个寄存器,必须用功能码 16。
+                // 起始地址合法不代表**整段**合法:32 位值写在 65535 上会跨到地址 0,
+                // 后半个字落到区首 —— 设备不会报错,但别的点位被改了。
+                if (writeAddress + regs.Length > 0x10000)
+                {
+                    error = "写入跨出地址空间:起始 " + writeAddress + " + " + regs.Length
+                        + " 个寄存器超出 65535,拒绝写入(后半截会绕回区首覆盖别的点位)";
+
+                    return false;
+                }
+
                 _client.WriteRegisters (writeAddress, regs);
             }
 

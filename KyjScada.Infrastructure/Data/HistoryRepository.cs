@@ -26,12 +26,56 @@ public sealed class HistoryRepository : IHistoryRepository
     {
         if (points.Count == 0) return 0;
 
+        // 先把"缓存里还没有"的变量名**去重凑成一批**,用一个连接一次解决。
+        // 早先是逐点调 GetOrCreateVarId:首次归档 35 个变量就是 35 次 OpenConnection
+        // + 35 次 INSERT/SELECT,首个归档周期明显拖慢(库在机械盘/网络盘上更明显)。
+        var missing = new List<(string Name, string Device, string Unit)>();
+
+        lock (_cacheLock)
+        {
+            foreach (var p in points)
+            {
+                if (_varIdCache.ContainsKey(p.VarName)) continue;
+
+                var already = false;
+
+                foreach (var m in missing)
+                {
+                    if (string.Equals(m.Name, p.VarName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        already = true;
+
+                        break;
+                    }
+                }
+
+                if (!already) missing.Add((p.VarName, p.DeviceName, p.Unit));
+            }
+        }
+
+        if (missing.Count > 0)
+        {
+            EnsureSchema();
+
+            using var conn = OpenConnection();
+
+            foreach (var m in missing) GetOrCreateVarIdCore(conn, m.Name, m.Device, m.Unit);
+        }
+
         var records = new List<HistoryRecord>(points.Count);
 
-        foreach (var p in points)
+        lock (_cacheLock)
         {
-            var id = GetOrCreateVarId(p.VarName, p.DeviceName, p.Unit);
-            records.Add(new HistoryRecord(p.SampleTime, id, p.Value, p.Quality));
+            foreach (var p in points)
+            {
+                if (!_varIdCache.TryGetValue(p.VarName, out var id))
+                {
+                    // 上方已保证建齐;走到这里说明缓存被并发清掉了,宁可报错也不能写错 VarId
+                    throw new InvalidOperationException("取建变量 ID 失败: " + p.VarName);
+                }
+
+                records.Add(new HistoryRecord(p.SampleTime, id, p.Value, p.Quality));
+            }
         }
 
         return WriteBatch(records);
@@ -59,8 +103,80 @@ public sealed class HistoryRepository : IHistoryRepository
 
     private const int MaxWalAttempts = 5;
 
-    /// <summary>WAL 未能启用时的原因(诊断用;成功或未尝试时为 null)。</summary>
-    public static string? LastWalError { get; private set; }
+    /// <summary>
+    /// 建索引的重试记账(按库文件)。与 <see cref="WalRetry"/> 同一个道理:
+    ///   · 索引失败**不能就此定案** —— 建不全就只剩"重启一次机会"了,
+    ///     而缺的偏偏是 idx_history_var_id 这种"每变量最新值"要用的索引;
+    ///   · 也不能每次 EnsureSchema 都重试一遍 ——
+    ///     在几十万行的库上 CREATE INDEX 是一次真实写操作(要排序、依赖临时空间),
+    ///     失败一次可能好几秒,而 EnsureSchema 是**每次归档写**都会走的。
+    /// 所以:失败后按指数退避重试,试满 MaxIndexAttempts 次就放弃(只留 LastIndexError)。
+    /// </summary>
+    private static readonly Dictionary<string, (int Attempts, DateTime NextTryUtc)> IndexRetry
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    private const int MaxIndexAttempts = 5;
+
+    /// <summary>
+    /// 该库是否还有"待重试的建索引"。
+    ///
+    /// 表建好之后 EnsureSchema 本来可以直接返回,但只要索引还没建全、
+    /// 且没到重试上限,就得再进来一次 —— 否则退避形同虚设,
+    /// 实际只尝试一次,本进程内再也不建索引(查询静默退化成全表扫描)。
+    /// </summary>
+    private static bool IndexPending(string dbPath)
+    {
+        lock (SchemaLock)
+        {
+            // **没到退避时刻也算"没有待办"**:否则退避期里的每一次 EnsureSchema
+            // (每次归档写都会走)都会白开一个连接进去,TryCreateIndexes 一看时间不到
+            // 又直接 return —— 退避最长 60 秒,期间白开的连接全是无谓开销。
+            return IndexRetry.TryGetValue(dbPath, out var state)
+                   && state.Attempts < MaxIndexAttempts
+                   && DateTime.UtcNow >= state.NextTryUtc;
+        }
+    }
+
+    /// <summary>
+    /// WAL 未能启用的原因,**按库文件**记账(诊断用)。
+    ///
+    /// 早先是单个静态属性:多库场景下(本轮测试大量临时库、生产换配置目录也是新库)
+    /// 库 B 切 WAL 成功就会把它清成 null,把库 A 的失败记录**一并抹掉** ——
+    /// 现场"哪个库卡在 delete 模式"再也看不出来,而 B 那次清理本身毫无必要。
+    /// 现在与 <see cref="WalRetry"/> 同一口径:只清/只记本库的。
+    /// </summary>
+    private static readonly Dictionary<string, string> WalErrors
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 建索引未能完成的原因,**按库文件**记账(诊断用)。
+    ///
+    /// 同样是 static 全局的老问题:库 B 建索引成功会把它清成 null,
+    /// 于是 <see cref="IndexPending"/> 判断"该库还有没有索引没建全"的记账
+    /// 与实际错误对不上 —— 库 A 的失败提示被库 B 的成功悄悄抹掉。
+    /// 索引只影响查询快慢,不影响正确性,所以这里**只记录不抛**;
+    /// 界面把它显示出来,现场才知道"最近值查询可能偏慢"是有原因的。
+    /// </summary>
+    private static readonly Dictionary<string, string> IndexErrors
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>该库最近一次 WAL 失败的原因;该库切成功或从未尝试过则为 null。</summary>
+    public static string? GetLastWalError(string dbPath)
+    {
+        lock (SchemaLock)
+        {
+            return WalErrors.TryGetValue(dbPath ?? "", out var e) ? e : null;
+        }
+    }
+
+    /// <summary>该库最近一次建索引失败的原因;该库建全或从未尝试过则为 null。</summary>
+    public static string? GetLastIndexError(string dbPath)
+    {
+        lock (SchemaLock)
+        {
+            return IndexErrors.TryGetValue(dbPath ?? "", out var e) ? e : null;
+        }
+    }
 
     /// <summary>
     /// 该库是否还有"待重试的 WAL 切换"。
@@ -73,7 +189,11 @@ public sealed class HistoryRepository : IHistoryRepository
     {
         lock (SchemaLock)
         {
-            return WalRetry.TryGetValue(dbPath, out var state) && state.Attempts < MaxWalAttempts;
+            // 与 IndexPending 同理:退避期没到就不算"待办",
+            // 免得每次归档写都白开一个连接、进去立刻又 return。
+            return WalRetry.TryGetValue(dbPath, out var state)
+                   && state.Attempts < MaxWalAttempts
+                   && DateTime.UtcNow >= state.NextTryUtc;
         }
     }
 
@@ -116,34 +236,143 @@ public sealed class HistoryRepository : IHistoryRepository
         return conn;
     }
 
-    /// <summary>建表(幂等)。首次使用时调用。表建好之后不再重复;WAL 单独按退避重试。</summary>
+    /// <summary>建表(幂等)。表建好之后不再重复;WAL 与建索引各自按退避重试。</summary>
     public void EnsureSchema()
     {
         lock (SchemaLock)
         {
             var schemaDone = SchemaReady.Contains(_dbPath);
 
-            // 表已建好但 WAL 还没切成功:必须再进来一次去重试 WAL。
-            // 早先这里一律 return,于是 TryEnableWal 的指数退避与 MaxWalAttempts
-            // 永远不会被触发 —— 实际上只尝试一次,失败就永远停在 delete 模式。
-            if (schemaDone && !WalPending(_dbPath)) return;
+            // 只要还有一件没做完就得再进来:表没建 / WAL 没切成功 / 索引没建全。
+            // 早先"表建好就一律 return",于是 WAL 的退避与索引的重试都形同虚设。
+            if (schemaDone && !WalPending(_dbPath) && !IndexPending(_dbPath)) return;
 
             using var conn = OpenConnection();
 
             TryEnableWal(conn);
 
-            if (schemaDone) return;
+            if (!schemaDone)
+            {
+                // 建表:失败就是致命(没有表既不能归档也不能查询),抛出去并带上具体语句。
+                ExecuteStatements(conn, HistorySchema.CreateTableStatements, fatal: true);
 
-            foreach (var sql in HistorySchema.AllCreateStatements)
+                // 表已经建好了,这一步不需要因为 WAL/索引没成而重做
+                SchemaReady.Add(_dbPath);
+            }
+
+            if (!schemaDone || IndexPending(_dbPath)) TryCreateIndexes(conn);
+        }
+    }
+
+    /// <summary>
+    /// 建索引。**失败绝不能致命,也绝不能一条失败就把后面的全丢掉**。
+    ///
+    /// 索引只是性能优化,而在已有大库上建索引是一次真实写操作(CREATE INDEX 要排序,
+    /// 依赖临时空间):实测在 app 自身进程里对 29 万行的现场库建 idx_history_var_id
+    /// 会报 SQLITE_CANTOPEN(error 14),而同一份库在全新进程里能建成功。
+    /// 若让它抛,整个历史库会连**读**都做不了 —— 把"慢一点"变成"完全不能用"。
+    ///
+    /// 三条索引的顺序是"时间 → 变量+时间 → 变量+Id":越靠后越是"每变量最新值"
+    /// (MCP read_variable / 界面最新值)的关键索引。早先这里是"第一条失败就 return",
+    /// 于是第一条一挂,后面两条**一条都不建** —— 偏偏挂的常常是第一条,
+    /// 结果把最要命的 idx_history_var_id 一起丢了,查询静默退化成全表扫描。
+    /// </summary>
+    private void TryCreateIndexes(SqliteConnection conn)
+    {
+        int attempts;
+
+        lock (SchemaLock)
+        {
+            if (IndexRetry.TryGetValue(_dbPath, out var state))
+            {
+                if (state.Attempts >= MaxIndexAttempts) return;
+
+                if (DateTime.UtcNow < state.NextTryUtc) return;
+
+                attempts = state.Attempts;
+            }
+            else
+            {
+                attempts = 0;
+            }
+        }
+
+        // 先用 temp_store=MEMORY 降低对临时文件的依赖(排序放内存,本表规模下只有几 MB)
+        try
+        {
+            using var tmp = conn.CreateCommand();
+            tmp.CommandText = "PRAGMA temp_store=MEMORY;";
+            tmp.ExecuteNonQuery();
+        }
+        catch
+        {
+            // 设不上不影响建表;索引最多退化成用临时文件
+        }
+
+        // fatal:false —— 逐条尽力而为,失败的汇总成本库的错误记录,成功的照样建上
+        var failure = ExecuteStatements(conn, HistorySchema.CreateIndexStatements, fatal: false);
+
+        lock (SchemaLock)
+        {
+            if (failure is null)
+            {
+                IndexRetry.Remove(_dbPath);
+                IndexErrors.Remove(_dbPath);
+
+                return;
+            }
+
+            var next = attempts + 1;
+
+            // 指数退避,封顶 60 秒
+            var delay = TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, next)));
+
+            IndexRetry[_dbPath] = (next, DateTime.UtcNow + delay);
+
+            IndexErrors[_dbPath] = failure + " —— 第 " + next + " 次建索引失败"
+                + (next >= MaxIndexAttempts
+                    ? ",已达重试上限,本进程不再尝试(这些查询会退化成全表扫描)"
+                    : ",将在 " + (int)delay.TotalSeconds + " 秒后重试");
+        }
+    }
+
+    /// <summary>
+    /// 顺序执行一批 DDL。
+    /// <paramref name="fatal"/>=true 时失败即抛(建表);false 时**把每一条的错误都收齐**再返回(建索引)。
+    ///
+    /// 建索引为什么必须"收齐"而不是"见错就返回":DDL 之间没有依赖,
+    /// 第一条挂掉不代表后面两条也建不成。早先 return 掉了,于是 idx_history_var_id
+    /// (每变量最新值的关键索引)永远建不上。
+    /// </summary>
+    private string? ExecuteStatements(
+        SqliteConnection conn, IReadOnlyList<string> statements, bool fatal)
+    {
+        var errors = new List<string>();
+
+        foreach (var sql in statements)
+        {
+            try
             {
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
                 cmd.ExecuteNonQuery();
             }
+            catch (Exception ex)
+            {
+                if (fatal)
+                {
+                    // 必须带上"是哪一条 DDL":底层只报 "unable to open database file"
+                    // 时现场根本分不清是建表失败还是建索引失败,而两者处置完全不同。
+                    throw new InvalidOperationException(
+                        "初始化历史库失败(" + _dbPath + ")。失败语句: " + sql
+                        + " —— " + ex.Message, ex);
+                }
 
-            // 表已经建好了,这一步不需要因为 WAL 没切成就重做
-            SchemaReady.Add(_dbPath);
+                errors.Add(sql + " —— " + ex.Message);
+            }
         }
+
+        return errors.Count == 0 ? null : string.Join(" ; ", errors);
     }
 
     /// <summary>
@@ -194,7 +423,10 @@ public sealed class HistoryRepository : IHistoryRepository
             if (string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase))
             {
                 WalRetry.Remove(_dbPath);
-                LastWalError = null;
+
+                // 只清**本库**的失败记录:多库场景下别的库还卡在 delete 模式,
+                // 此处切成功不该把它的记录一并抹掉。
+                WalErrors.Remove(_dbPath);
 
                 return;
             }
@@ -206,7 +438,7 @@ public sealed class HistoryRepository : IHistoryRepository
 
             WalRetry[_dbPath] = (next, DateTime.UtcNow + delay);
 
-            LastWalError = "未能启用 WAL(第 " + next + " 次,返回 " + (mode ?? "null") + ")"
+            WalErrors[_dbPath] = "未能启用 WAL(第 " + next + " 次,返回 " + (mode ?? "null") + ")"
                 + (error is null ? "" : ":" + error)
                 + (next >= MaxWalAttempts ? " —— 已达重试上限,本进程不再尝试" : ",将在 " + (int)delay.TotalSeconds + " 秒后重试");
         }
@@ -234,35 +466,51 @@ public sealed class HistoryRepository : IHistoryRepository
 
         using var conn = OpenConnection();
 
+        return GetOrCreateVarIdCore(conn, varName, deviceName, unit);
+    }
+
+    /// <summary>
+    /// 在**已打开**的连接上"取或建"变量 ID,并写进缓存。
+    /// 批量路径(WritePoints)靠它做到一批变量只开一次连接。调用方负责连接生命周期与建表。
+    /// </summary>
+    private int GetOrCreateVarIdCore(SqliteConnection conn, string varName, string deviceName, string unit)
+    {
+        lock (_cacheLock)
+        {
+            if (_varIdCache.TryGetValue(varName, out var cached))
+            {
+                return cached;
+            }
+        }
+
+        using var cmd = conn.CreateCommand();
+
         // 一条语句搞定"取或建":
         // 先 INSERT ... ON CONFLICT DO NOTHING(VarName 上有 UNIQUE),再 SELECT 回来。
         // 老写法是"先 SELECT,查不到再 INSERT",两个线程/两个实例同时首写同一个变量时,
         // 双方都查不到 → 都去 INSERT → 后者撞 UNIQUE 抛 SqliteException,
         // 那个采集通道的归档就此断掉(而且每次重试都撞)。这里靠唯一约束做原子去重。
-        using (var cmd = conn.CreateCommand())
+        cmd.CommandText =
+            "INSERT INTO VarDict (VarName, DeviceName, Unit) VALUES ($n, $d, $u) " +
+            "ON CONFLICT (VarName) DO NOTHING; " +
+            "SELECT VarId FROM VarDict WHERE VarName = $n;";
+
+        cmd.Parameters.AddWithValue("$n", varName);
+        cmd.Parameters.AddWithValue("$d", deviceName ?? "");
+        cmd.Parameters.AddWithValue("$u", unit ?? "");
+
+        var result = cmd.ExecuteScalar();
+
+        if (result is null || result == DBNull.Value)
         {
-            cmd.CommandText =
-                "INSERT INTO VarDict (VarName, DeviceName, Unit) VALUES ($n, $d, $u) " +
-                "ON CONFLICT (VarName) DO NOTHING; " +
-                "SELECT VarId FROM VarDict WHERE VarName = $n;";
-
-            cmd.Parameters.AddWithValue("$n", varName);
-            cmd.Parameters.AddWithValue("$d", deviceName ?? "");
-            cmd.Parameters.AddWithValue("$u", unit ?? "");
-
-            var result = cmd.ExecuteScalar();
-
-            if (result is null || result == DBNull.Value)
-            {
-                throw new InvalidOperationException ("取建变量 ID 失败: " + varName);
-            }
-
-            var id = Convert.ToInt32(result, CultureInfo.InvariantCulture);
-
-            lock (_cacheLock) _varIdCache[varName] = id;
-
-            return id;
+            throw new InvalidOperationException ("取建变量 ID 失败: " + varName);
         }
+
+        var id = Convert.ToInt32(result, CultureInfo.InvariantCulture);
+
+        lock (_cacheLock) _varIdCache[varName] = id;
+
+        return id;
     }
 
     /// <summary>
@@ -294,7 +542,7 @@ public sealed class HistoryRepository : IHistoryRepository
 
             foreach (var r in records)
             {
-                pTime.Value = r.SampleTime.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture);
+                pTime.Value = DbTime.Format(r.SampleTime, HistorySchema.TimeFormat);
                 pVar.Value = r.VarId;
                 pVal.Value = r.Value;
                 pQ.Value = r.Quality;
@@ -341,7 +589,7 @@ public sealed class HistoryRepository : IHistoryRepository
 
             foreach (var r in records)
             {
-                pTime.Value = r.SampleTime.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture);
+                pTime.Value = DbTime.Format(r.SampleTime, HistorySchema.TimeFormat);
                 pVar.Value = r.VarId;
                 pVal.Value = r.Value;
                 pQ.Value = r.Quality;
@@ -377,8 +625,8 @@ public sealed class HistoryRepository : IHistoryRepository
             "ORDER BY SampleTime LIMIT $limit";
 
         cmd.Parameters.AddWithValue("$v", varId.Value);
-        cmd.Parameters.AddWithValue("$from", from.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture));
-        cmd.Parameters.AddWithValue("$to", to.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$from", DbTime.Format(from, HistorySchema.TimeFormat));
+        cmd.Parameters.AddWithValue("$to", DbTime.Format(to, HistorySchema.TimeFormat));
         cmd.Parameters.AddWithValue("$limit", limit);
 
         return ReadRecords(cmd);
@@ -399,8 +647,8 @@ public sealed class HistoryRepository : IHistoryRepository
             "WHERE SampleTime >= $from AND SampleTime <= $to " +
             "ORDER BY SampleTime LIMIT $limit";
 
-        cmd.Parameters.AddWithValue("$from", from.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture));
-        cmd.Parameters.AddWithValue("$to", to.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$from", DbTime.Format(from, HistorySchema.TimeFormat));
+        cmd.Parameters.AddWithValue("$to", DbTime.Format(to, HistorySchema.TimeFormat));
         cmd.Parameters.AddWithValue("$limit", limit);
 
         return ReadRecords(cmd);
@@ -497,7 +745,7 @@ public sealed class HistoryRepository : IHistoryRepository
         using var cmd = conn.CreateCommand();
 
         cmd.CommandText = "DELETE FROM History WHERE SampleTime < $c";
-        cmd.Parameters.AddWithValue("$c", cutoff.ToString(HistorySchema.TimeFormat, CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$c", DbTime.Format(cutoff, HistorySchema.TimeFormat));
 
         return cmd.ExecuteNonQuery();
     }

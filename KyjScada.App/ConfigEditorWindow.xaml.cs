@@ -764,6 +764,12 @@ private GroupConfig? _clipGroup;
 
 private void OnEditorKeyDown(object sender, KeyEventArgs e)
 {
+    // 焦点在文本输入框里时**不要**拦 Ctrl+C/V。
+    // 这里处理的是"复制/粘贴变量或组",抢走按键的后果是属性面板的
+    // TextBox 里选不中文字、也粘不进内容(现场改备注/单位/说明时最常碰到)。
+    // 让它走系统默认的复制粘贴。
+    if (Keyboard.FocusedElement is System.Windows.Controls.Primitives.TextBoxBase) return;
+
     if (Keyboard.Modifiers != ModifierKeys.Control) return;
 
     if (e.Key == Key.C)

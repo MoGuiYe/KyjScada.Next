@@ -40,7 +40,7 @@ public static class ConcurrentAcquisitionTests
 
             try
             {
-                coord.Build (new[] { devA, devB });
+                coord.BuildAsync (new[] { devA, devB }).GetAwaiter ().GetResult ();
                 TestHelpers.AssertEq (2, coord.StartAll (), "两台都应启动");
 
                 // 给两轮以上的时间
@@ -101,7 +101,7 @@ public static class ConcurrentAcquisitionTests
 
             try
             {
-                coord.Build (new[] { devA, devB });
+                coord.BuildAsync (new[] { devA, devB }).GetAwaiter ().GetResult ();
                 coord.StartAll ();
 
                 Thread.Sleep (300);

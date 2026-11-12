@@ -55,8 +55,20 @@ public sealed class ArchiveService
     /// <summary>累计写入行数(诊断用)。</summary>
     public long TotalWritten { get; private set; }
 
-    /// <summary>最近一次错误。null = 无错误。</summary>
-    public string? LastError { get; private set; }
+    /// <summary>最近一次归档(写库)失败原因。null = 上一批写成功。</summary>
+    private string? _writeError;
+
+    /// <summary>最近一次保留期清理失败原因。null = 上次清理成功或没配保留期。</summary>
+    private string? _purgeError;
+
+    /// <summary>
+    /// 最近一次错误(归档或清理)。两者**分开记账**再合并显示:
+    /// 早先写库成功一句 `LastError = null` 就把清理失败的原因一起抹掉了 ——
+    /// 磁盘满导致删不掉旧数据,状态栏却显示一切正常,库只涨不跌直到写不进去。
+    /// </summary>
+    public string? LastError =>
+        _writeError is not null && _purgeError is not null ? _writeError + "; " + _purgeError
+        : _writeError ?? _purgeError;
 
     /// <summary>最近一次成功写库时刻。</summary>
     public DateTime LastWrite => _lastWrite;
@@ -146,7 +158,16 @@ public sealed class ArchiveService
                 tv.Quality == TagQuality.Good ? 0 : 1));
         }
 
-        if (points.Count == 0) return 0;
+        // 本批没有有效值,但上一批可能还欠着 —— 不能直接 return:
+        // 那样 _pending 永远等不到"下一次有数据的批次",节拍也不推进,
+        // 库恢复后补写被无限期推迟(现场表现:历史一直缺那一段)。
+        if (points.Count == 0 && _pending.Count == 0)
+        {
+            // 什么都没有:节拍也要推进,否则掉线回来的第一轮起就一直"不到点"
+            AdvancePace (sampleTime);
+
+            return 0;
+        }
 
         // 先补上一批没写成的点,再追加本批
         var batch = new List<HistoryPoint>(_pending.Count + points.Count);
@@ -167,13 +188,16 @@ public sealed class ArchiveService
             var written = _repo.WritePoints(batch);
             _lastWrite = sampleTime;
             TotalWritten += written;
-            LastError = null;
+
+            // 只清**写库**这一路的原因;清理失败的原因留着
+            _writeError = null;
+
             return written;
         }
         catch (Exception ex)
         {
             // 归档失败不能拖垮监控
-            LastError = ex.Message;
+            _writeError = ex.Message;
 
             _pending.AddRange(batch);
 
@@ -208,12 +232,16 @@ public sealed class ArchiveService
         try
         {
             var cutoff = now.AddDays(-retentionDays);
+
             LastPurged = _repo.DeleteBefore(cutoff);
+            _purgeError = null;
+
             return LastPurged;
         }
         catch (Exception ex)
         {
-            LastError = "清理失败: " + ex.Message;
+            _purgeError = "清理失败: " + ex.Message;
+
             return 0;
         }
     }

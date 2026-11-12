@@ -71,14 +71,18 @@ t.Run("变量字段完整", () =>
     Assert.Near(5.0, v.LowAlarmValue, "低报值");
 });
 
-t.Run("Scale 为 0 时修正为 1", () =>
+t.Run("Scale 为 0 时原样保留,交给校验器报错", () =>
 {
     var json = "[{\"ProjectName\":\"P\",\"ModbusTCPList\":[{\"DeviceName\":\"D\",\"IpAddress\":\"1.1.1.1\",\"Port\":502,\"GroupList\":[{\"GroupName\":\"G\",\"VarList\":[{\"VarName\":\"V\",\"VarType\":\"Float\",\"Scale\":0}]}]}]}]";
 
     var projects = SettingsJsonCodec.Parse(json);
     var v = SettingsJsonCodec.ActiveProject(projects)!.GetDevices("ModbusTCP")[0].GroupList[0].VarList[0];
 
-    Assert.Near(1.0, v.Scale, "Scale 0 应修正为 1,否则读数恒为 0");
+    // 以前这里静默改成 1:配置坏了不报错,下次保存还把 1 写回文件,
+    // 于是 ConfigValidator 里"Scale 为 0"那条检查永远是死代码。
+    // 现在 0 原样读出来,由校验器报错、由配置编辑器阻止保存。
+    // 运行期安全由读取侧(ConvertRawToValue)与写入侧(WriteVariable)各自的 0→1 兜底保证。
+    Assert.Near(0.0, v.Scale, "Scale 0 不应被静默改写,否则校验器永远看不见这个错");
 });
 
 t.Run("串口设备解析", () =>

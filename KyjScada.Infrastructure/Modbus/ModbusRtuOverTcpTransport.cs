@@ -23,6 +23,14 @@ public sealed class ModbusRtuOverTcpTransport : IModbusTransport
 
     private readonly object _ioLock = new();
 
+    /// <summary>已释放。Dispose 之后不允许再用:否则会悄悄重连,把连接重新占住。</summary>
+    private volatile bool _disposed;
+
+    private void EnsureNotDisposed()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(ModbusRtuOverTcpTransport));
+    }
+
     public ModbusRtuOverTcpTransport(string host, int port, byte unitId = 1)
     {
         _host = string.IsNullOrWhiteSpace(host) ? "127.0.0.1" : host;
@@ -48,6 +56,7 @@ public sealed class ModbusRtuOverTcpTransport : IModbusTransport
 
     public void Connect()
     {
+        EnsureNotDisposed();
         if (IsConnected) return;
 
         // 冷静期内直接失败:宁可报"通讯已断开",也不能让调用方干等
@@ -107,11 +116,16 @@ public sealed class ModbusRtuOverTcpTransport : IModbusTransport
 
     public void Disconnect()
     {
-        try { _stream?.Dispose(); } catch { }
-        try { _client?.Dispose(); } catch { }
+        // 与在途帧互斥:直接关流会把正在读的那一帧腰斩成半帧。
+        // Monitor 可重入,Execute 的失败分支在本线程调它不会自锁。
+        lock (_ioLock)
+        {
+            try { _stream?.Dispose(); } catch { }
+            try { _client?.Dispose(); } catch { }
 
-        _stream = null;
-        _client = null;
+            _stream = null;
+            _client = null;
+        }
     }
 
     public ushort[] ReadHoldingRegisters(ushort startAddress, ushort quantity)
@@ -326,6 +340,8 @@ public sealed class ModbusRtuOverTcpTransport : IModbusTransport
 
     public void Dispose()
     {
+        _disposed = true;
+
         Disconnect();
     }
 }

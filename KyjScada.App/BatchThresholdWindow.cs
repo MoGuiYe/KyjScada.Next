@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -209,6 +209,13 @@ public sealed class BatchThresholdWindow : Window
         if (SetLow) LowValue = lo;
         if (SetDeadband) Deadband = db;
 
+        // 浮点解析接受 "NaN"/"Infinity" 这些字面量(TryParse 会成功),必须单独挡:
+        // NaN 一旦落进组态,所有比较 (值 > NaN) 恒为 false —— 报警/死区/写入越界
+        // 全部静默失效,界面上却像配好了。
+        if (SetHigh && !IsFiniteValue (hi, "上限")) return;
+        if (SetLow && !IsFiniteValue (lo, "下限")) return;
+        if (SetDeadband && !IsFiniteValue (db, "死区")) return;
+
         if (SetHigh && SetLow && LowValue >= HighValue)
         {
             _error.Text = "下限必须小于上限(下限 " + LowValue + ",上限 " + HighValue + ")";
@@ -224,6 +231,15 @@ public sealed class BatchThresholdWindow : Window
         }
 
         DialogResult = true;
+    }
+
+    private bool IsFiniteValue (float v, string label)
+    {
+        if (!float.IsNaN (v) && !float.IsInfinity (v)) return true;
+
+        _error.Text = label + "不能是 NaN / Infinity(会让所有阈值比较恒不成立)";
+
+        return false;
     }
 
     private static bool TryParse (string? text, out float value)

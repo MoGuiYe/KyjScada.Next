@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using KyjScada.Domain.Users;
@@ -233,6 +233,36 @@ public partial class UserManageWindow : Window
 
         try
         {
+            var wantActive = ActiveBox.IsChecked == true;
+            var keepManage = (perms & PermissionBit.CanManageUsers) != 0;
+
+            // 自检:不能把最后一个管理员停用/降权,也不能停用最后一个还能登录的账号。
+            // 删除账号那条路已经有这条保护(见 OnDelete),**改权限这条路原先漏了** ——
+            // 结果是把唯一的 admin 降权之后,再没人能进用户管理页把权限改回来,
+            // 现场只能删库或重装。
+            var wasActiveManager = row.IsActive && (row.Permissions & PermissionBit.CanManageUsers) != 0;
+
+            if (wasActiveManager)
+            {
+                var otherManagers = _rows.Count(r => r.IsActive
+                    && (r.Permissions & PermissionBit.CanManageUsers) != 0
+                    && !string.Equals(r.UserName, row.UserName, StringComparison.OrdinalIgnoreCase));
+
+                if (otherManagers == 0 && (!wantActive || !keepManage))
+                {
+                    ResultText.Text = "这是最后一个可用管理员:不能停用,也不能取消「用户管理」权限(否则再没人能改回来)";
+
+                    return;
+                }
+            }
+
+            if (row.IsActive && !wantActive && _rows.Count(r => r.IsActive) <= 1)
+            {
+                ResultText.Text = "这是最后一个可用账号,不能停用(否则系统将无法登录)";
+
+                return;
+            }
+
             var ok = _repo.UpdatePermissions(row.UserName, perms, ActiveBox.IsChecked == true);
 
             ResultText.Text = ok

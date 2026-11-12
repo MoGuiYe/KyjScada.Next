@@ -129,12 +129,16 @@ public sealed class AlarmService
     {
         var events = new List<AlarmEvent>();
 
-        if (snapshot is null || _machines.Count == 0) return events;
+        if (snapshot is null) return events;
 
         // 多设备并发后,本方法在采集线程跑、GetActiveAlarms 在界面线程跑,
         // 两个线程会碰同一批状态机槽位,所以必须互斥。
         lock (_sync)
         {
+            // _machines.Count 也必须在锁里读:它在重建配置时会被替换,
+            // 锁外读是 Dictionary 的并发读-写,最坏会读到半更新的内部状态。
+            if (_machines.Count == 0) return events;
+
             foreach (var slot in _machines.Values)
             {
                 var value = snapshot[slot.VarName]?.AsDouble();

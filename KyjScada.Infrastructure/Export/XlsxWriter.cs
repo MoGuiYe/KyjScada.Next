@@ -71,6 +71,11 @@ public static class XlsxWriter
         // 用户看到的是"导出成功"却打不开 —— 提前抛,界面上至少能显示真实原因。
         foreach (var sheet in sheets) CheckLimits (sheet);
 
+        // 工作表名必须唯一。早先只做去非法字符与截断,**不保证唯一**:
+        // 两个同名 sheet(都叫"数据"),或两个长名截断到相同的前 31 字符,
+        // 都会生成 Excel 判定为损坏的文件 —— 与上面 CheckLimits 的初衷正好相反。
+        var sheetNames = BuildUniqueNames(sheets);
+
         var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
         try
@@ -80,7 +85,7 @@ public static class XlsxWriter
             {
                 Add(zip, "[Content_Types].xml", ContentTypes(sheets.Length));
                 Add(zip, "_rels/.rels", RootRels());
-                Add(zip, "xl/workbook.xml", Workbook(sheets));
+                Add(zip, "xl/workbook.xml", Workbook(sheetNames));
                 Add(zip, "xl/_rels/workbook.xml.rels", WorkbookRels(sheets.Length));
                 Add(zip, "xl/styles.xml", Styles());
 
@@ -103,6 +108,41 @@ public static class XlsxWriter
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// 把各表名规整成 Excel 认可的、**互不重复**的名字。
+    /// 重名时追加 (2)/(3)… 并保证追加后仍在 31 字符以内。
+    /// </summary>
+    private static string[] BuildUniqueNames(XlsxSheet[] sheets)
+    {
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var names = new string[sheets.Length];
+
+        for (var i = 0; i < sheets.Length; i++)
+        {
+            var baseName = SafeName(sheets[i].Name, i);
+
+            var name = baseName;
+            var suffix = 1;
+
+            while (!used.Add(name))
+            {
+                suffix++;
+
+                var tag = "(" + suffix + ")";
+
+                // 截断时给后缀留位置,否则追加完又超 31 字符
+                var room = Math.Max(1, 31 - tag.Length);
+                var head = baseName.Length > room ? baseName[..room] : baseName;
+
+                name = head + tag;
+            }
+
+            names[i] = name;
+        }
+
+        return names;
     }
 
     private static void CheckLimits(XlsxSheet sheet)
@@ -176,7 +216,7 @@ public static class XlsxWriter
                "</Relationships>";
     }
 
-    private static string Workbook(XlsxSheet[] sheets)
+    private static string Workbook(string[] sheetNames)
     {
         var sb = new StringBuilder();
 
@@ -184,9 +224,9 @@ public static class XlsxWriter
         sb.Append("<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" ");
         sb.Append("xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>");
 
-        for (var i = 0; i < sheets.Length; i++)
+        for (var i = 0; i < sheetNames.Length; i++)
         {
-            sb.Append("<sheet name=\"").Append(EscapeAttr(SafeName(sheets[i].Name, i)))
+            sb.Append("<sheet name=\"").Append(EscapeAttr(sheetNames[i]))
               .Append("\" sheetId=\"").Append(i + 1).Append("\" r:id=\"rId").Append(i + 1).Append("\"/>");
         }
 

@@ -33,7 +33,18 @@ public sealed class WriteTools
         if (double.IsNaN(value) || double.IsInfinity(value))
             return "拒绝:非法数值。";
 
-        return handler(name.Trim(), value);
+        try
+        {
+            return handler(name.Trim(), value);
+        }
+        catch (Exception ex)
+        {
+            // 写通道抛异常时**不能**让它变成协议层的未知错误:
+            // 究竟下发没下发说不清,AI 客户端可能据此重试 —— 对 PLC 来说就是重复写。
+            // 明确告诉它"结果未知,请先读回/人工核实",不要重试。
+            return "写入结果未知(写通道异常): " + ex.Message
+                + "\n请勿直接重试 —— 先用 read_variable 读回该点确认设备是否已接受本次写入。";
+        }
     }
 
     /// <summary>主程序调用:探测写通道是否可用(用于 get_write_status)。</summary>

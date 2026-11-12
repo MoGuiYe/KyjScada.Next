@@ -26,7 +26,10 @@ public sealed class ModbusTcpClient : IDisposable
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly object _connectLock = new();
 
-    private bool _disposed;
+    /// <summary>等"在途帧"收尾的上限(断开/释放时用)。超时就直接关句柄,那是唯一能打断阻塞往返的手段。</summary>
+    private static readonly TimeSpan InFlightDrainTimeout = TimeSpan.FromSeconds (2);
+
+    private volatile bool _disposed;
 
     /// <summary>单次请求超时。</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(3);
@@ -62,6 +65,8 @@ public sealed class ModbusTcpClient : IDisposable
     /// <summary>建立连接(幂等)。</summary>
     public void Connect ()
     {
+        EnsureNotDisposed ();
+
         lock (_connectLock)
         {
             if (_tcp is not null && _tcp.Connected) return;
@@ -119,11 +124,43 @@ public sealed class ModbusTcpClient : IDisposable
     /// <summary>断开连接。</summary>
     public void Disconnect ()
     {
-        lock (_connectLock)
+        // 已释放:只做收尾,不再碰信号量(它可能已经被 Dispose 掉了)
+        if (_disposed)
         {
-            CloseInternal ();
+            lock (_connectLock) CloseInternal ();
+
+            return;
         }
+
+        // 不在请求线程上时:先等在途的那一帧收尾,再关流。
+        // 不等的话会把别人正在读的帧腰斩成半帧 —— 对端的帧边界就此错位,
+        // 之后每帧都从错误位置解析(现场表现是"一断就连续报 CRC/长度错")。
+        if (!t_inRequest && _requestLock.Wait (InFlightDrainTimeout))
+        {
+            try
+            {
+                lock (_connectLock) CloseInternal ();
+            }
+            finally
+            {
+                _requestLock.Release ();
+            }
+
+            return;
+        }
+
+        // 本线程自己就在往返里(Execute 的失败分支),或是等超时了:
+        // 直接关。句柄是唯一能打断阻塞往返的手段。
+        lock (_connectLock) CloseInternal ();
     }
+
+    /// <summary>
+    /// 该线程当前是否正在一次请求-响应往返里。
+    ///
+    /// 为什么需要它:Execute 的异常分支会调 Disconnect 自我清理,而那时它就握着
+    /// _requestLock —— SemaphoreSlim 不可重入,Disconnect 再去等它就会自己把自己卡死。
+    /// </summary>
+    [ThreadStatic] private static bool t_inRequest;
 
     private void CloseInternal ()
     {
@@ -257,14 +294,31 @@ public sealed class ModbusTcpClient : IDisposable
     }
 
     /// <summary>
+    /// 已释放之后再调读写,必须明确报 ObjectDisposedException。
+    ///
+    /// 原来只有 Dispose 自己判 _disposed:释放之后 _requestLock 已经被 Dispose 掉,
+    /// 这时任何一个在途调用走到 _requestLock.Wait 都会抛 ObjectDisposedException,
+    /// 被上层 catch 成"通讯失败: ..." —— 现场看不出是"设备已经换了/关了",
+    /// 只会以为通讯坏了,反复重连一个已经不存在的服务。
+    /// </summary>
+    private void EnsureNotDisposed ()
+    {
+        if (_disposed) throw new ObjectDisposedException (nameof (ModbusTcpClient));
+    }
+
+    /// <summary>
     /// 执行一次请求-响应往返。串行化,校验事务号,失败抛异常。
     /// </summary>
     private void Execute (byte[] pdu, byte expectedFunction, Action<byte[]> onResponse)
     {
+        EnsureNotDisposed ();
+
         if (!_requestLock.Wait (Timeout))
         {
             throw new ModbusException ("等待请求锁超时");
         }
+
+        t_inRequest = true;
 
         try
         {
@@ -281,7 +335,7 @@ public sealed class ModbusTcpClient : IDisposable
 
             var response = ReadResponse (stream);
 
-            var (function, data) = ModbusFrame.ParseResponse (response, transactionId);
+            var (function, data) = ModbusFrame.ParseResponse (response, transactionId, _unitId);
 
             if (function != expectedFunction)
             {
@@ -309,6 +363,8 @@ public sealed class ModbusTcpClient : IDisposable
         }
         finally
         {
+            t_inRequest = false;
+
             _requestLock.Release ();
         }
     }
@@ -413,9 +469,30 @@ public sealed class ModbusTcpClient : IDisposable
     {
         if (_disposed) return;
 
+        // 先立旗:之后的读写/连接一律明确拒绝,不再去碰即将释放的信号量
         _disposed = true;
 
-        Disconnect ();
+        // 给在途帧一拍时间收尾(最多 InFlightDrainTimeout),再关连接 ——
+        // 直接腰斩会让对端看到半帧,帧边界错位后每一帧都解析失败。
+        // 等不到(卡死的往返)也只能关句柄:那是唯一能打断阻塞 I/O 的手段。
+        var drained = false;
+
+        try
+        {
+            drained = _requestLock.Wait (InFlightDrainTimeout);
+        }
+        catch (ObjectDisposedException)
+        {
+            // 已经释放过了:忽略,下面照常关连接
+        }
+
+        lock (_connectLock) CloseInternal ();
+
+        if (drained)
+        {
+            try { _requestLock.Release (); } catch (SemaphoreFullException) { }
+        }
+
         _requestLock.Dispose ();
     }
 }

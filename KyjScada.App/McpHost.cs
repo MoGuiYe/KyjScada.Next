@@ -95,7 +95,7 @@ internal static class McpHost
                 //
                 // token 默认**必须**:没配环境变量就自动生成一个并落盘,
                 // 否则本机任意进程都能借着"闸门已开启"写 PLC(见 IsAllowedRequest 的注释)。
-                var token = ResolveToken(settingsDir);
+                var token = ResolveToken();
 
                 app.Use(async (ctx, next) =>
                 {
@@ -181,122 +181,30 @@ internal static class McpHost
     /// <summary>
     /// 取本次运行使用的 token。
     ///
-    /// 优先环境变量 KYJ_MCP_TOKEN;没配就生成一个随机值并写入 data\mcp_token.txt ——
+    /// 优先环境变量 KYJ_MCP_TOKEN;没配就生成一个随机值并写入 <see cref="TokenFile"/> ——
     /// 客户端(本机 AI 工具)读这个文件拿 token,在请求头里带
     /// `Authorization: Bearer &lt;token&gt;`。
     /// 显式设 KYJ_MCP_ALLOW_ANONYMOUS=1 可退回"不校验"(仅用于老客户端改不动的场合)。
+    ///
+    /// **落盘位置只认 TokenFile 一处。** 早先这里又按 BaseDirectory\data 硬拼了一遍
+    /// 同一个路径,而 TokenFile 是**给客户端读**的那份声明 ——
+    /// 改一处漏一处就是"程序写 A、客户端读 B",现场表现是
+    /// "token 明明在文件里,请求却一直 403",而且看代码两处都像是对的。
     /// </summary>
-    private static string ResolveToken(string settingsDir)
+    private static string ResolveToken()
     {
-        var configured = Environment.GetEnvironmentVariable("KYJ_MCP_TOKEN");
-
-        if (!string.IsNullOrEmpty(configured)) return configured;
-
-        if (Environment.GetEnvironmentVariable("KYJ_MCP_ALLOW_ANONYMOUS") == "1") return "";
-
-        try
-        {
-            var dir = System.IO.Path.Combine(AppContext.BaseDirectory, "data");
-
-            System.IO.Directory.CreateDirectory(dir);
-
-            var file = System.IO.Path.Combine(dir, "mcp_token.txt");
-
-            // 已有就复用:重启后客户端不必重新配置
-            if (System.IO.File.Exists(file))
-            {
-                var existing = System.IO.File.ReadAllText(file).Trim();
-
-                if (existing.Length >= 16) return existing;
-            }
-
-            var fresh = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
-
-            System.IO.File.WriteAllText(file, fresh, new System.Text.UTF8Encoding(false));
-
-            return fresh;
-        }
-        catch
-        {
-            // 生成失败时**拒绝所有请求**比放行安全:放行等于任意本地进程可写 PLC
-            return "unavailable-" + Guid.NewGuid().ToString("N");
-        }
+        return KyjScada.Mcp.McpAccessGuard.ResolveToken(TokenFile);
     }
 
     /// <summary>
     /// 请求准入:只接受"从本机回环地址、用本机主机名、来源是本机页面、且带正确 token"的请求。
+    ///
+    /// 实现与独立版(KyjScada.Mcp 的 Program)共用 <see cref="KyjScada.Mcp.McpAccessGuard"/>:
+    /// 两处各写一遍时,独立版曾经完全没有这道闸。
     /// </summary>
     private static bool IsAllowedRequest(HttpContext ctx, int port, string? token)
     {
-        var host = ctx.Request.Host;
-
-        var name = host.Host ?? "";
-
-        var localHost = name.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("localhost", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("::1", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("[::1]", StringComparison.OrdinalIgnoreCase);
-
-        if (!localHost) return false;
-
-        if (host.Port.HasValue && host.Port.Value != port) return false;
-
-        // 浏览器发跨站请求一定带 Origin;不是本机来源就是有人在借用你这台机器的写权限
-        var origin = ctx.Request.Headers["Origin"].ToString();
-
-        if (!string.IsNullOrEmpty(origin))
-        {
-            var ok = origin.Equals("http://127.0.0.1:" + port, StringComparison.OrdinalIgnoreCase)
-                || origin.Equals("http://localhost:" + port, StringComparison.OrdinalIgnoreCase);
-
-            if (!ok) return false;
-        }
-
-        // ==================== token 校验 ====================
-        // 早先是"没设 KYJ_MCP_TOKEN 就一路放行"。这有个真实漏洞:
-        // Host/Origin 白名单只挡浏览器发起的跨站请求(DNS rebinding),
-        // 挡不住**本机任意进程** —— 任何本地程序 curl 一下就能在闸门开启时写 PLC,
-        // 而闸门是操作员为正常作业打开的,不会为此关掉。
-        //
-        // 现在的默认:**必须带 token**。没配环境变量就自动生成一个,
-        // 落在 data\mcp_token.txt 里供本机客户端读取(文件名与值都会写进状态栏与日志)。
-        // 现场若确实需要匿名访问(例如老客户端改不动),设 KYJ_MCP_ALLOW_ANONYMOUS=1 显式退回。
-        if (string.IsNullOrEmpty(token))
-        {
-            return Environment.GetEnvironmentVariable("KYJ_MCP_ALLOW_ANONYMOUS") == "1";
-        }
-
-        return FixedTimeEqualsOne(
-            ctx.Request.Headers["Authorization"].ToString(),
-            "Bearer " + token);
-    }
-
-    /// <summary>
-    /// token 比较必须是恒定时间。用 == 比较字符串时,运行库会在第一个不同字符处返回,
-    /// 比较耗时随"前多少位猜对"变化 —— 攻击者能靠计时把 token 一位一位试出来。
-    ///
-    /// 长度不同时也先补齐再比,避免"长度不对立刻返回"同样泄露长度信息;
-    /// 长度差异本身由返回值体现,不影响结果正确性。
-    /// </summary>
-    private static bool FixedTimeEqualsOne(string? actual, string expected)
-    {
-        actual ??= "";
-
-        var a = System.Text.Encoding.UTF8.GetBytes(actual);
-        var b = System.Text.Encoding.UTF8.GetBytes(expected);
-
-        var len = Math.Max(a.Length, b.Length);
-
-        var pa = new byte[len];
-        var pb = new byte[len];
-
-        Array.Copy(a, pa, a.Length);
-        Array.Copy(b, pb, b.Length);
-
-        // 两个条件都要算完再与,不能短路 —— 短路会把长度差异泄露成时间差
-        var same = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(pa, pb);
-
-        return same && a.Length == b.Length;
+        return KyjScada.Mcp.McpAccessGuard.IsAllowedRequest(ctx, port, token);
     }
 
     /// <summary>
@@ -345,11 +253,18 @@ internal static class McpHost
     /// </summary>
     public static void StopInBackground()
     {
-        var app = Detach();
+        // Detach 也要放到**线程池**:它取的是 _gate,而 Start 正在启动时会一直握着它
+        // (最长 10 秒 —— 等 StartAsync)。若在界面线程上调 Detach,关窗就会冻结这 10 秒,
+        // 现场表现是"点关闭,窗口十几秒没反应"。
+        // 状态清理仍然是同步语义上的"很快"(锁一空出来就清),只是不占界面线程等。
+        Task.Run(() =>
+        {
+            var app = Detach();
 
-        if (app is null) return;
+            if (app is null) return;
 
-        Task.Run(() => DisposeApp(app, wait: false));
+            DisposeApp(app, wait: false);
+        });
     }
 
     /// <summary>摘掉当前实例并同步清空对外状态;返回要释放的实例。</summary>

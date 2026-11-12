@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Globalization;
 using KyjScada.Mcp.Data;
 using ModelContextProtocol.Server;
@@ -45,7 +45,17 @@ public sealed class ReadOnlyTools
         // 新库:变量字典在 VarDict,直接查库(名称/设备/单位),不依赖组态 JSON。
         if (_db.IsNewSchema)
         {
-            var dict = _db.GetVarDict();
+            Dictionary<string, (string? Device, string? Unit)> dict;
+
+            try
+            {
+                dict = _db.GetVarDict();
+            }
+            catch (Exception ex)
+            {
+                return DbFailure(ex);
+            }
+
             var names = dict.Keys
                 .Where(n => keyword == null ||
                             n.Contains(keyword, StringComparison.OrdinalIgnoreCase))
@@ -109,11 +119,30 @@ public sealed class ReadOnlyTools
         return sb.ToString();
     }
 
+    private static string DbFailure(Exception ex)
+    {
+        // 采集端高频写库时,读连接可能被锁;库文件被占用/损坏也会走到这里。
+        // 不接住的话异常会变成协议层的 -32603 未知错误,AI 只能看到"出错了",
+        // 分不清是"库被锁"还是"工具写坏了",更没法据此决定要不要重试。
+        return "查询失败(数据库读取异常): " + ex.Message
+            + "\n如果采集程序正在高频写库,稍后重试;若持续失败,请检查历史库文件是否被占用或损坏。";
+    }
+
     [McpServerTool, Description("读取单个变量的最新值。返回原始值、时间戳与数据新鲜度。注意:这是归档快照,非内存实时值。")]
     public string ReadVariable(
         [Description("变量名,例如 LQT_Level、KYJ1_OutTemp")] string name)
     {
-        var latest = _db.ReadLatestRow();
+        (string? InsertTime, Dictionary<string, string?> Values, Dictionary<string, string?> Times)? latest;
+
+        try
+        {
+            latest = _db.ReadLatestRow();
+        }
+        catch (Exception ex)
+        {
+            return DbFailure(ex);
+        }
+
         if (latest == null)
             return _db.IsNewSchema
                 ? "历史库为空,还没有任何归档数据。"
@@ -163,7 +192,17 @@ public sealed class ReadOnlyTools
     public string ReadVariables(
         [Description("变量名列表,逗号分隔,例如 LQT_Level,KYJ1_OutTemp")] string names)
     {
-        var latest = _db.ReadLatestRow();
+        (string? InsertTime, Dictionary<string, string?> Values, Dictionary<string, string?> Times)? latest;
+
+        try
+        {
+            latest = _db.ReadLatestRow();
+        }
+        catch (Exception ex)
+        {
+            return DbFailure(ex);
+        }
+
         if (latest == null)
             return _db.IsNewSchema ? "历史库为空。" : "ActualData 表为空。";
 
@@ -221,7 +260,17 @@ public sealed class ReadOnlyTools
         if (s > e) return "开始时间晚于结束时间。";
 
         var cols = names.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var rows = _db.QueryHistory(cols, s, e, limit);
+
+        List<HistoryRow> rows;
+
+        try
+        {
+            rows = _db.QueryHistory(cols, s, e, limit);
+        }
+        catch (Exception ex)
+        {
+            return DbFailure(ex);
+        }
 
         if (rows.Count == 0)
             return $"在 {start} ~ {end} 范围内,变量 [{names}] 无数据。";
@@ -264,7 +313,17 @@ public sealed class ReadOnlyTools
             return $"时间格式错误。必须为 {DbReader.TimeFormat}";
         }
 
-        var stat = _db.QueryStat(name, s, e);
+        StatResult? stat;
+
+        try
+        {
+            stat = _db.QueryStat(name, s, e);
+        }
+        catch (Exception ex)
+        {
+            return DbFailure(ex);
+        }
+
         if (stat == null)
             return _db.IsNewSchema
                 ? $"变量 {name} 不在 VarDict 中。可用 list_variables 查看全部变量。"
@@ -303,15 +362,40 @@ public sealed class ReadOnlyTools
         var v = _config.EnumerateVariables(project)
             .FirstOrDefault(x => x.VarName != null && x.VarName.Equals(name, StringComparison.OrdinalIgnoreCase));
 
-        if (v == null || !v.HighAlarmEnable) return null;
-        if (stat.Max == null) return null;
+        if (v == null) return null;
 
-        if (v.HighAlarmValue > 0 && stat.Max > v.HighAlarmValue * 10)
+        // 早先是 `!v.HighAlarmEnable` 直接 return —— 只配了低报的变量永远得不到
+        // 任何数据质量提示,而"液位掉到 0/传感器断线读 0"正是低限方向的典型异常。
+        if (!v.HighAlarmEnable && !v.LowAlarmEnable) return null;
+
+        if (v.HighAlarmEnable && stat.Max is { } hiMax && v.HighAlarmValue > 0
+            && hiMax > v.HighAlarmValue * 10)
         {
             return
-                $"最大值 {stat.Max:0.###} 远超组态上限 {v.HighAlarmValue:0.###}(超过 10 倍)," +
+                $"最大值 {hiMax:0.###} 远超组态上限 {v.HighAlarmValue:0.###}(超过 10 倍)," +
                 $"库中很可能存在采集异常或错位读数。请勿直接用平均值或最大值做判断," +
                 $"建议先用 query_history 抽样确认正常区间。";
+        }
+
+        if (v.LowAlarmEnable && stat.Min is { } loMin)
+        {
+            // 组态说"不该低于下限",实际却低了一个数量级 → 多半是断线读数/空值被当 0
+            if (v.LowAlarmValue > 0 && loMin < v.LowAlarmValue / 10.0)
+            {
+                return
+                    $"最小值 {loMin:0.###} 远低于组态下限 {v.LowAlarmValue:0.###}(不足其 1/10)," +
+                    $"库中很可能存在传感器断线读数或空值被当成 0。请勿直接用平均值或最小值做判断," +
+                    $"建议先用 query_history 抽样确认正常区间。";
+            }
+
+            // 下限本身非负,却读回负值:液位/压力/流量这类物理量不该为负
+            if (v.LowAlarmValue >= 0 && loMin < 0)
+            {
+                return
+                    $"最小值 {loMin:0.###} 为负值,而组态下限是 {v.LowAlarmValue:0.###} —— " +
+                    $"该物理量不应为负,库中很可能存在错位读数或脏值。" +
+                    $"建议先用 query_history 抽样确认正常区间。";
+            }
         }
 
         return null;
@@ -373,9 +457,12 @@ public sealed class ReadOnlyTools
         {
             var partial = logs.Count == 0
                 ? "报警库读取失败,无法确认是否有报警(不要据此判断为无报警)"
-                : "报警库读取部分失败,以下结果可能不完整";
+                : "报警库读取部分失败,以下 " + logs.Count + " 条可能不完整";
 
-            return partial + ":" + readError;
+            // 已经读到的行**必须带出去**。原来这里直接 return,把 logs 整个丢掉 ——
+            // 文案写着"以下结果可能不完整",后面却一条都没有,
+            // 现场等于什么都没拿到,还以为是"确实没报警"。
+            return partial + ":" + readError + "\n\n" + FormatLogs(logs);
         }
 
         var sText = s.ToString(DbReader.TimeFormat, CultureInfo.InvariantCulture);
@@ -383,6 +470,14 @@ public sealed class ReadOnlyTools
 
         if (logs.Count == 0)
             return $"在 {sText} ~ {eText} 范围内无日志记录。";
+
+        return FormatLogs(logs);
+    }
+
+    /// <summary>把日志行渲染成表格。读失败时也要能把"已读到的部分"带出去。</summary>
+    private static string FormatLogs(List<LogRow> logs)
+    {
+        if (logs.Count == 0) return "(没有已读到的记录)";
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"返回 {logs.Count} 条");

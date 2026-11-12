@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -223,8 +223,11 @@ public static class SettingsJsonCodec
     {
         var scale = obj.Value<float?>("Scale");
 
-        // Scale 为 0 或缺省都视为 1,否则读数恒为 0 且不报错
-        if (scale is null or 0f) scale = 1f;
+        // 缺省视为 1;但**显式写 0 不再静默改成 1** —— 那正是"配错不报错、
+        // 静默改用户配置"的老毛病:现场改坏成 0,下次保存又被悄悄写回 1,
+        // 配置校验里那条"Scale 为 0"的检查因此永远是死代码。
+        // 现在 0 原样读出来,交给 ConfigValidator 报错、配置编辑器阻止保存。
+        if (scale is null) scale = 1f;
 
         return new VariableConfig
         {
@@ -440,7 +443,8 @@ public static class SettingsJsonCodec
     ///
     /// 规则:
     ///  · 只有原文件**确实不存在**时才恢复(.json 在就说明保存成功了,.old 是上一版残留,不动它);
-    ///  · 先试 .old,再试 .bak(更早的兜底);
+    ///  · .old 有两种名字都要认:老的固定名 xxx.json.old,和现在用的唯一名
+    ///    xxx.json.&lt;guid&gt;.old(见 <see cref="SaveFile"/> 的最后兜底);
     ///  · 恢复失败不抛 —— 读组态这条路径不能因为清理失败而起不来。
     /// </summary>
     private static void RecoverOrphans(string dir)
@@ -449,7 +453,7 @@ public static class SettingsJsonCodec
 
         try
         {
-            olds = Directory.GetFiles(dir, "*.json.old");
+            olds = Directory.GetFiles(dir, "*.old");
         }
         catch
         {
@@ -458,7 +462,10 @@ public static class SettingsJsonCodec
 
         foreach (var old in olds)
         {
-            var target = old.Substring(0, old.Length - ".old".Length);
+            // 只拾掇"配置文件留下的 .old":导出物或其它东西的 .old 不归这里管
+            var target = TargetOfOld(old);
+
+            if (target is null) continue;
 
             try
             {
@@ -478,6 +485,41 @@ public static class SettingsJsonCodec
             }
         }
     }
+
+    /// <summary>
+    /// 从 .old 文件名还原它原本的名字。不是配置文件留下的 .old 返回 null。
+    ///
+    /// 两种命名都要认:
+    ///  · ModbusTCP.json.old            —— 老的固定名(现场目录里可能还有);
+    ///  · ModbusTCP.json.3f2a…9c.old    —— 唯一名(<see cref="SaveFile"/> 现在用的)。
+    ///
+    /// 为什么改成唯一名:固定名 + overwrite:true 会把**上一次失败留下的 .old**
+    /// 直接覆盖掉,而那正是当时唯一还能救回来的旧内容。
+    /// </summary>
+    private static string? TargetOfOld(string oldPath)
+    {
+        if (!oldPath.EndsWith(".old", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var stem = oldPath.Substring(0, oldPath.Length - 4);
+
+        var dot = stem.LastIndexOf('.');
+
+        if (dot <= 0) return null;
+
+        var tail = stem.Substring(dot + 1);
+
+        // 唯一名后缀是 Guid 的 N 格式(32 位十六进制),去掉它才是真正的目标名
+        if (tail.Length == 32 && tail.All(IsHex))
+        {
+            stem = stem.Substring(0, dot);
+        }
+
+        // 配置文件的扩展名必须是 .json
+        return stem.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? stem : null;
+    }
+
+    private static bool IsHex(char c) =>
+        (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 
     /// <summary>
     /// 加载整个配置目录。
@@ -681,7 +723,11 @@ public static class SettingsJsonCodec
 
         // 最后手段:把旧的改名腾位(改名是原子操作,内容还在),再把新的挪进来;
         // 失败则改回原名。绝不先 File.Delete —— 那是不可恢复的。
-        var old = path + ".old";
+        //
+        // .old 名字**必须唯一**:固定的 path.old + overwrite:true 会把上一次失败
+        // 留下的 .old(那可能是唯一还能救回来的旧内容)直接覆盖掉。
+        // 口径与 Infrastructure/Export/AtomicFileWrite 保持一致。
+        var old = path + "." + Guid.NewGuid().ToString("N") + ".old";
 
         File.Move(path, old, overwrite: true);
 
@@ -689,19 +735,24 @@ public static class SettingsJsonCodec
         {
             File.Move(tmp, path);
         }
-        catch
+        catch (Exception moveEx)
         {
             try
             {
                 File.Move(old, path, overwrite: true);
             }
-            catch
+            catch (Exception rollbackEx)
             {
-                RestoreBackup(path);
+                // 回滚失败意味着原位置已经空了。这里**绝不能**拿 .bak 顶上:
+                // .bak 可能是上上版(甚至更早),拿它覆盖等于把"上一版配置"和
+                // "这次的新内容"一起丢掉 —— 现场看到的是配置莫名回退到几天前。
+                // 所以什么都不删:.old 是唯一的旧内容,.tmp 是这次唯一的新内容,
+                // 都留给现场手工恢复,并把两个真实路径写进异常。
+                throw new IOException(
+                    "保存失败且回滚失败。旧配置保留在 " + old + ",新配置保留在 " + tmp,
+                    new AggregateException(moveEx, rollbackEx));
             }
 
-            // 保留 .tmp:里面是这次要保存的新内容,删了就真没了;
-            // 下次保存会重写它,不会越积越多。
             throw;
         }
 
@@ -712,24 +763,6 @@ public static class SettingsJsonCodec
         catch
         {
             // 旧的删不掉只是留个文件,不影响保存结果
-        }
-    }
-
-    /// <summary>
-    /// 保存失败后的兜底:把上一次的 .bak 顶回原位置。
-    /// 只是"尽量别把现场搞成没有配置文件",回滚本身失败就只能把异常交给调用方提示。
-    /// </summary>
-    private static void RestoreBackup(string path)
-    {
-        var bak = path + ".bak";
-
-        try
-        {
-            if (File.Exists(bak)) File.Copy(bak, path, overwrite: true);
-        }
-        catch
-        {
-            // 回滚失败:保留原异常(调用方会提示"保存失败"),此处不再抛
         }
     }
 }

@@ -158,12 +158,17 @@ public static class ModbusValueCodec
 
         if (swapWords)
         {
-            // 交换两个 2 字节组(AB CD → CD AB)
-            var half = b.Length / 2;
-
-            for (int i = 0; i < half; i++)
+            // 交换**寄存器顺序**(2 字节为一组整段反转),与读取侧
+            // ModbusAcquisitionService.ToBytes 的 Array.Reverse(regs) 完全一致。
+            //
+            // 早先这里按"前后两半对调"做,而读取侧按"整段反转"做:
+            // 32 位(2 寄存器)时两种写法恰好等价,64 位(4 寄存器)时就不一样了 ——
+            // 同一个 CDAB/DCBA 配置,写进去的位序和读回来的位序不同。
+            // 目前 64 位写入是禁用的,所以问题被掩盖着;一旦开放就是"写 1.5 读回别的数"。
+            for (int i = 0, j = b.Length - 2; i < j; i += 2, j -= 2)
             {
-                (b[i], b[i + half]) = (b[i + half], b[i]);
+                (b[i], b[j]) = (b[j], b[i]);
+                (b[i + 1], b[j + 1]) = (b[j + 1], b[i + 1]);
             }
         }
 

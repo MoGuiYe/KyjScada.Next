@@ -12,7 +12,70 @@ namespace KyjScada.Infrastructure.Users;
 public sealed class UserRepository
 {
     private readonly string _dbPath;
-    private bool _schemaReady;
+
+    /// <summary>
+    /// 建表 / 切 WAL 的串行锁。journal_mode 是库级持久设置,切换要抢独占锁;
+    /// 登录(界面线程)与 MCP 查询可能同时首次打开本库,不加锁就会撞锁失败。
+    /// </summary>
+    private static readonly object SchemaLock = new ();
+
+    /// <summary>本库文件的建表状态,跨实例共享。</summary>
+    private static readonly HashSet<string> SchemaReady = new (StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// WAL 切换的失败次数与下次重试时刻(按库文件)。
+    ///
+    /// WAL 与"建表"必须分开记账:
+    ///   · 表建好了就是建好了,不需要因为 WAL 没切成就每次重做;
+    ///   · WAL 没切成功要**有限地**重试,不能无限重试 ——
+    ///     每次 PRAGMA journal_mode 都要抢库级独占锁,配合 busy_timeout=5000
+    ///     每次可能阻塞数秒。
+    /// 所以:失败后按指数退避重试,试满 MaxWalAttempts 次就放弃(只留 LastWalError)。
+    /// </summary>
+    private static readonly Dictionary<string, (int Attempts, DateTime NextTryUtc)> WalRetry
+        = new (StringComparer.OrdinalIgnoreCase);
+
+    private const int MaxWalAttempts = 5;
+
+    /// <summary>
+    /// WAL 未能启用的原因,**按库文件**记账(诊断用)。
+    ///
+    /// 早先是单个静态属性:多库场景下(本轮测试大量临时库、生产换配置目录也是新库)
+    /// 库 B 切 WAL 成功就会把它清成 null,把库 A 的失败记录**一并抹掉** ——
+    /// 现场"哪个库卡在 delete 模式"再也看不出来,而 B 那次清理本身毫无必要。
+    /// 现在与 <see cref="WalRetry"/> 同一口径:只清/只记本库的。
+    /// </summary>
+    private static readonly Dictionary<string, string> WalErrors
+        = new (StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>该库最近一次 WAL 失败的原因;该库切成功或从未尝试过则为 null。</summary>
+    public static string? GetLastWalError (string dbPath)
+    {
+        lock (SchemaLock)
+        {
+            return WalErrors.TryGetValue (dbPath ?? "", out var e) ? e : null;
+        }
+    }
+
+    /// <summary>
+    /// 该库是否还有"待重试的 WAL 切换"。
+    ///
+    /// 表建好之后 EnsureSchema 本来可以直接返回,但只要 WAL 还没切成功、
+    /// 且没到重试上限,就得再进来一次 —— 否则 TryEnableWal 的退避形同虚设,
+    /// 实际只尝试一次,失败就**永久**停在 delete 模式(登录写 LastLoginAt 与
+    /// MCP 查询并发时会报 SQLITE_BUSY)。
+    /// </summary>
+    private static bool WalPending(string dbPath)
+    {
+        lock (SchemaLock)
+        {
+            // 退避期没到不算"待办":否则每次 EnsureSchema 都白开一个连接,
+            // 进去 TryEnableWal 一看时间不到又直接 return。
+            return WalRetry.TryGetValue(dbPath, out var state)
+                   && state.Attempts < MaxWalAttempts
+                   && DateTime.UtcNow >= state.NextTryUtc;
+        }
+    }
 
     public UserRepository(string dbPath)
     {
@@ -39,32 +102,122 @@ CREATE TABLE IF NOT EXISTS Users (
         {
             DataSource = _dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared
+
+            // 不用 Shared 缓存:SQLite 官方已列为不推荐,与 WAL 组合时并发写会
+            // 返回 SQLITE_LOCKED(历史库那边实测过)。并发靠 WAL + busy_timeout。
+            Cache = SqliteCacheMode.Private
         };
 
         var conn = new SqliteConnection(builder.ToString());
         conn.Open();
 
+        // journal_mode 是库级独占操作,不在这里做(每次开连接都做会让并发互相阻塞);
+        // 只在 EnsureSchema 里做,切不成按退避重试。
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "PRAGMA journal_mode=wal; PRAGMA synchronous=normal;";
+        cmd.CommandText = "PRAGMA busy_timeout=5000; PRAGMA synchronous=normal;";
         cmd.ExecuteNonQuery();
 
         return conn;
     }
 
+    /// <summary>建表(幂等)。表建好之后不再重复;WAL 单独按退避重试。</summary>
     public void EnsureSchema()
     {
-        if (_schemaReady) return;
-
-        using var conn = OpenConnection();
-
-        using (var cmd = conn.CreateCommand())
+        lock (SchemaLock)
         {
-            cmd.CommandText = CreateSql;
-            cmd.ExecuteNonQuery();
+            var schemaDone = SchemaReady.Contains(_dbPath);
+
+            // 表已建好但 WAL 还没切成功:必须再进来一次去重试 WAL。
+            // 早先这里一律 return,于是 TryEnableWal 的指数退避与 MaxWalAttempts
+            // 永远不会被触发 —— 实际上只尝试一次,首次切失败就永久停在 delete 模式。
+            if (schemaDone && !WalPending(_dbPath)) return;
+
+            using var conn = OpenConnection();
+
+            TryEnableWal(conn);
+
+            if (schemaDone) return;
+
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = CreateSql;
+                cmd.ExecuteNonQuery();
+            }
+
+            // 表已经建好了,这一步不需要因为 WAL 没切成就重做
+            SchemaReady.Add(_dbPath);
+        }
+    }
+
+    /// <summary>
+    /// 尝试把库切到 WAL,失败则按指数退避安排下次重试。
+    ///
+    /// **必须看返回值**:被别的连接占着时这句会"成功但没切过去",返回的仍是 delete。
+    /// 切不过去不影响可用性(库仍是 delete 模式),所以不抛 ——
+    /// 但**必须记下来并安排重试**,否则这个库在本进程里就永远停在 delete 模式了。
+    /// </summary>
+    private void TryEnableWal(SqliteConnection conn)
+    {
+        int attempts;
+
+        lock (SchemaLock)
+        {
+            if (WalRetry.TryGetValue(_dbPath, out var state))
+            {
+                if (state.Attempts >= MaxWalAttempts) return;
+
+                if (DateTime.UtcNow < state.NextTryUtc) return;
+
+                attempts = state.Attempts;
+            }
+            else
+            {
+                attempts = 0;
+            }
         }
 
-        _schemaReady = true;
+        string? mode = null;
+        string? error = null;
+
+        try
+        {
+            using var pragma = conn.CreateCommand();
+            pragma.CommandText = "PRAGMA journal_mode=wal;";
+
+            // 返回值就是切换后的实际模式:不等于 "wal" 即没切成功
+            mode = pragma.ExecuteScalar() as string;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        lock (SchemaLock)
+        {
+            if (string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase))
+            {
+                WalRetry.Remove(_dbPath);
+
+                // 只清**本库**的失败记录:别的库还卡在 delete 模式时,
+                // 本库切成功不该把它的记录一并抹掉。
+                WalErrors.Remove(_dbPath);
+
+                return;
+            }
+
+            var next = attempts + 1;
+
+            // 指数退避,封顶 60 秒
+            var delay = TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, next)));
+
+            WalRetry[_dbPath] = (next, DateTime.UtcNow + delay);
+
+            WalErrors[_dbPath] = "用户库未能启用 WAL(第 " + next + " 次,返回 " + (mode ?? "null") + ")"
+                + (error is null ? "" : ":" + error)
+                + (next >= MaxWalAttempts
+                    ? " —— 已达重试上限,本进程不再尝试(并发写会报 SQLITE_BUSY)"
+                    : ",将在 " + (int)delay.TotalSeconds + " 秒后重试");
+        }
     }
 
     private static UserAccount Read(SqliteDataReader r)
@@ -127,6 +280,14 @@ CREATE TABLE IF NOT EXISTS Users (
     }
 
     /// <summary>
+    /// 账号不存在时用来走一遍"同样代价"散列校验的假盐/假哈希。
+    /// 目的只是让"用户不存在"和"密码错"耗时接近,防时序账号枚举。
+    /// </summary>
+    private static readonly string DummySalt = PasswordHasher.NewSalt();
+
+    private static readonly string DummyHash = PasswordHasher.Hash("-", DummySalt);
+
+    /// <summary>
     /// 登录校验。成功返回账号并记录登录时间;失败返回 null(不区分"用户不存在"和"密码错",
     /// 避免账号探测)。
     /// </summary>
@@ -134,13 +295,23 @@ CREATE TABLE IF NOT EXISTS Users (
     {
         var user = Find(userName);
 
-        if (user is null) return null;
-        if (!user.IsActive) return null;
-
-        if (!PasswordHasher.Verify(password, user.Salt, user.PasswordHash, user.Iterations))
+        if (user is null)
         {
+            // 账号不存在也要走一遍**同样代价**的散列校验:
+            // 直接 return 比"密码错"快一个数量级,本机任意进程可以据此逐个试出
+            // 哪些账号存在(再配合默认口令就是定向爆破)。
+            PasswordHasher.Verify(password ?? "", DummySalt, DummyHash, PasswordHasher.Iterations);
+
             return null;
         }
+
+        var ok = PasswordHasher.Verify(password, user.Salt, user.PasswordHash, user.Iterations);
+
+        // 先校验密码再看 IsActive:否则"已停用"的账号会跳过散列,
+        // 时间差一样能区分出"这个账号确实存在,只是被停用了"。
+        if (!ok) return null;
+
+        if (!user.IsActive) return null;
 
         EnsureSchema();
 

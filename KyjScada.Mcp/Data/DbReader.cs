@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 
 namespace KyjScada.Mcp.Data;
 
@@ -235,7 +235,10 @@ public sealed class DbReader
                 "JOIN VarDict d ON d.VarId = h.VarId " +
                 "WHERE d.VarName COLLATE NOCASE IN (" + names + ") " +
                 "AND h.SampleTime >= @s AND h.SampleTime <= @e " +
-                "ORDER BY h.SampleTime ASC LIMIT @n";
+                // 必须 DESC:ASC + LIMIT 拿到的是时间窗里**最早**的那批,
+                // "查最近 2 小时"实际返回的是两小时之前头几十条 —— 数据没错但全错位。
+                // 取完再翻回升序(接口承诺升序),见下面的 Skip。
+                "ORDER BY h.SampleTime DESC LIMIT @n";
             cmd.Parameters.AddWithValue("@s", DbText(start, TimeFormat));
             cmd.Parameters.AddWithValue("@e", DbText(end, TimeFormat));
 
@@ -257,7 +260,11 @@ public sealed class DbReader
                 dict[varName] = value;
             }
 
-            foreach (var kv in byTime.Take(limit))
+            // 只保留**最近**的 limit 个时刻(取排序后的尾部),输出仍是升序:
+            // 原来 Take(limit) 取的是头部 = 最早的一批,与"最近一次查询"的意图正好相反。
+            var skip = Math.Max(0, byTime.Count - limit);
+
+            foreach (var kv in byTime.Skip(skip))
                 rows.Add(new HistoryRow(kv.Key, kv.Value));
         }
         else
@@ -267,7 +274,8 @@ public sealed class DbReader
             cmd.CommandText =
                 "SELECT InsertTime, " + quoted + " FROM ActualData " +
                 "WHERE InsertTime >= @s AND InsertTime <= @e " +
-                "ORDER BY InsertTime ASC LIMIT @n";
+                // 同上:DESC 取最近的 limit 条,再翻回升序
+                "ORDER BY InsertTime DESC LIMIT @n";
             cmd.Parameters.AddWithValue("@s", DbText(start, TimeFormat));
             cmd.Parameters.AddWithValue("@e", DbText(end, TimeFormat));
             cmd.Parameters.AddWithValue("@n", limit);
@@ -281,6 +289,9 @@ public sealed class DbReader
                     vals[safe[i]] = reader.IsDBNull(i + 1) ? null : Convert.ToString(reader.GetValue(i + 1));
                 rows.Add(new HistoryRow(time, vals));
             }
+
+            // SQL 是 DESC(取最近的那批),接口承诺升序 —— 在这里翻回来
+            rows.Reverse();
         }
 
         return rows;
@@ -390,8 +401,6 @@ public sealed class DbReader
         var rows = new List<LogRow>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var errors = new List<string>();
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
 
         if (_isNew)
         {
@@ -426,6 +435,12 @@ public sealed class DbReader
         }
         else
         {
+            // 连接**只在这一支里开**:新库分支根本不碰主库(它读历史库 + alarms.db)。
+            // 早先无条件 conn.Open() 主库,主库被锁/损坏时这一句就抛,
+            // 报警一条都读不出来 —— 而这正是最需要看报警的时候。
+            using var conn = new SqliteConnection(_connectionString);
+            conn.Open();
+
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
                 "SELECT Id, InsertTime, LogType, Operator, Note, varName, AlarmSet, AlarmValue, AlarmType " +

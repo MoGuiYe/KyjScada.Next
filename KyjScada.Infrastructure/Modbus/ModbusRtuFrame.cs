@@ -124,7 +124,10 @@ public static class ModbusRtuFrame
 
             var total = 3 + byteCount + 2;
 
-            var rest = byteCount + 2 == 0 ? Array.Empty<byte> () : readExact (byteCount + 2);
+            // 这里以前写成 `byteCount + 2 == 0 ? Array.Empty<byte>() : readExact(...)`。
+            // byteCount 是 byte(最小 0),byteCount + 2 永远 >= 2,那个分支是死代码 ——
+            // 留着会让人误以为存在"不需要读 CRC"的路径。CRC 那 2 个字节**任何情况都要读**。
+            var rest = readExact (byteCount + 2);
 
             var frame = new byte[total];
             frame[0] = head[0];

@@ -1,4 +1,4 @@
-﻿using KyjScada.Domain.Config;
+using KyjScada.Domain.Config;
 using KyjScada.Infrastructure.Acquisition;
 
 namespace KyjScada.Infrastructure.Config;
@@ -45,6 +45,9 @@ public static class ConfigValidator
 
         var devices = project.AllDevices().ToList();
 
+        // 变量名 → 首次出现的设备名(跨设备唯一性检查用)
+        var globalVarNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         if (devices.Count == 0)
         {
             problems.Add("项目中没有任何设备");
@@ -65,6 +68,37 @@ public static class ConfigValidator
             }
 
             problems.AddRange(ValidateDevice(d));
+
+            // 变量名必须**全项目**唯一。历史库的 VarDict.VarName 是全局唯一键
+            // (见 HistoryRepository),两台设备用同一个变量名会写进同一个 VarId ——
+            // 趋势图把两台设备的数据画成一条线,报表统计也是合并的,现场根本看不出来。
+            // 这里以前只查"同一设备内不重名",等于允许制造这种串台配置。
+            var owner = string.IsNullOrWhiteSpace(d.DeviceName) ? "(未命名设备)" : d.DeviceName;
+
+            foreach (var g in d.GroupList ?? new List<GroupConfig>())
+            {
+                if (g.VarList is null) continue;
+
+                foreach (var v in g.VarList)
+                {
+                    if (string.IsNullOrWhiteSpace(v.VarName)) continue;
+
+                    if (globalVarNames.TryGetValue(v.VarName, out var firstOwner))
+                    {
+                        // 同一设备内的重名 ValidateDevice 已经报过,这里只管跨设备
+                        if (!string.Equals(firstOwner, owner, StringComparison.OrdinalIgnoreCase))
+                        {
+                            problems.Add("变量名重复(跨设备): " + v.VarName
+                                + " 同时出现在设备「" + firstOwner + "」与「" + owner
+                                + "」。历史库按变量名全局唯一,两台设备的数据会写进同一条历史(趋势/报表串台)");
+                        }
+                    }
+                    else
+                    {
+                        globalVarNames[v.VarName] = owner;
+                    }
+                }
+            }
         }
 
         return problems;
@@ -129,10 +163,15 @@ public static class ConfigValidator
                     problems.Add(where + ": 未知数据类型 (" + v.VarType + ")");
                 }
 
-                // Scale=0 是"静默读零"的头号原因
+                // Scale=0 是"静默读零"的头号原因;NaN/Infinity 会把所有读数变成 NaN。
+                // 这两类必须分开报:前者是"配错了值",后者是"写进去的不是数"。
                 if (v.Scale == 0f)
                 {
                     problems.Add(where + ": Scale 为 0,读数会恒为 0(应为 1)");
+                }
+                else if (!float.IsFinite(v.Scale))
+                {
+                    problems.Add(where + ": Scale 为 NaN/Infinity,所有读数都会变成 NaN");
                 }
 
                 if (v.HighAlarmEnable && !IsFiniteThreshold(v.HighAlarmValue))
@@ -151,7 +190,13 @@ public static class ConfigValidator
                         + " 小于下限 " + v.LowAlarmValue + "(设置反了)");
                 }
 
-                if (v.AlarmDeadband < 0f)
+                // 死区是"穿越阈值后还要多走多少才报警"的比较基准:
+                // NaN 时 (值 - 阈值) > NaN 恒为 false → 永远不报警,看着配了其实没有。
+                if (!float.IsFinite(v.AlarmDeadband))
+                {
+                    problems.Add(where + ": 报警死区不是有效数值(NaN/Infinity),报警比较会恒不成立");
+                }
+                else if (v.AlarmDeadband < 0f)
                 {
                     problems.Add(where + ": 报警死区不能为负");
                 }

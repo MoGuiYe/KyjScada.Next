@@ -26,7 +26,7 @@ KyjScada.Next 是老的 `KYJScadaProWpf`（单窗口几千行、采集/界面/�
 # 1) 编译(必须先杀掉正在跑的界面,否则文件被占用 → MSB3027)
 taskkill /IM KyjScada.App.exe /F
 cd D:\DeepSeekHarness\KyjScada.Next
-dotnet build KyjScada.Next.sln -v m          # 期望: 0 错误（124 条既有警告）
+dotnet build KyjScada.Next.sln -v m          # 期望: 0 错误（146 条既有警告）
 
 # 2) 跑界面
 .\KyjScada.App\bin\Debug\net8.0-windows\KyjScada.App.exe
@@ -42,13 +42,13 @@ dotnet build KyjScada.Next.sln -v m          # 期望: 0 错误（124 条既有�
 .\KyjScada.Mcp\bin\Debug\net8.0\KyjScada.Mcp.exe --settings "<...>\settings" --db "<...>\data\history.db" --selftest
 ```
 
-当前基线（2026-11-06 实测）：
+当前基线（2026-11-11 实测）：
 
 | 检查 | 结果 |
 |---|---|
-| `dotnet build` | 0 错误 / 约 120 条既有警告（nullable、未使用字段一类提示，非本轮引入） |
+| `dotnet build` | 0 错误 / 146 条既有警告（nullable、未使用字段一类提示，非本轮引入） |
 | `KyjScada.Domain.Tests` | **43 通过 / 0 失败** |
-| `KyjScada.Infrastructure.Tests` | **316 通过 / 0 失败 / 1 跳过** |
+| `KyjScada.Infrastructure.Tests` | **359 通过 / 0 失败 / 1 跳过** |
 | `KyjScada.Verify` | **7 个测试组 / 32 条断言全 PASS** |
 
 ---
@@ -88,7 +88,7 @@ D:\DeepSeekHarness\KyjScada.Next\        ← 源码根（没有 git 仓库）
 ├─ KyjScada.Verify\         (351 行)     模块化架构实证程序
 ├─ KyjScada.Migrate\        (150 行)     老库 → 新库一次性迁移 CLI
 ├─ KyjScada.Domain.Tests\                配置/协议/报警状态机测试（43）
-├─ KyjScada.Infrastructure.Tests\        Modbus/仓储/趋势/MCP 测试（316）
+├─ KyjScada.Infrastructure.Tests\        Modbus/仓储/趋势/MCP 测试（340）
 ├─ docs\                                  ← 本文档集
 └─ PROGRESS.md                           开发过程记录（含每轮的实测证据，改代码前值得翻）
 

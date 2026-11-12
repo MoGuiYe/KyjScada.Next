@@ -218,7 +218,11 @@ public sealed class DevicePipeline : IDisposable
                     }
                 }
 
-                if (got > 0 && Archive is not null && Archive.ShouldWrite(sampleTime))
+                // 节拍判断必须与归档写库用**同一个时间戳**。
+                // Archive.Archive 内部取的是 snapshot.Timestamp,而 sampleTime 是本轮采集
+                // **开始前**取的 DateTime.Now —— 两者可能跨秒,于是出现"节拍说该写,
+                // 落库时间戳却比上次还早"的补写/漏写。统一用快照时间。
+                if (got > 0 && Archive is not null && Archive.ShouldWrite(snap.Timestamp))
                 {
                     Archive.Archive(snap, Device);
                 }
@@ -264,10 +268,51 @@ public sealed class DevicePipeline : IDisposable
             or BadImageFormatException;
     }
 
+    /// <summary>
+    /// 等在途写帧的上限(<see cref="ReleaseAsync"/> 与同步 <see cref="Dispose"/> 共用)。
+    ///
+    /// 不能无限等:写入卡死时 WaitForWritesAsync 永远等不到"写完了",
+    /// 而等不到也不能把自己永久堵在这里。超时就照旧释放 —— 宁可丢一次写,
+    /// 也不能让释放线程(关窗路径、切设备路径)卡死。
+    /// </summary>
+    public static readonly TimeSpan InFlightWaitTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>是否已经释放过(释放有界,最多被调一次)。</summary>
+    private int _disposed;
+
     public void Dispose()
     {
-        // 先立标志再停:卡住的读一旦恢复,循环看到它会直接退出,不再发布假数据
+        // 幂等:窗口关闭路径(Binding Closed)可能走两遍,释放一遍就够,
+        // 第二遍再等一遍在途写纯属白等。
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        // 先立标志再等:等在途写的这最多 3 秒里,采集循环不该再发布新快照
+        // (否则等完写又采到一帧,现场看到的就是"停止之后还在跳数")。
+        // 原先只在等完关连接后才置位,关窗路径正是踩在这段空窗上。
         _released = true;
+
+        // **再等闸门里的在途写帧收尾**(上界 InFlightWaitTimeout)。
+        //
+        // 早先只有 ReleaseAsync 走这一步,Dispose 是一条直接关连接的旁路:
+        // 关窗时原先调的是 _coordinator.Dispose() → 这里直接 Service.Dispose(),
+        // 而 MCP 写工具可能还有一帧在下发途中 —— 与它抢同一个串口句柄,
+        // 结果是写结果不明、串口异常。现在两条路径都收口在这里,
+        // 调用方走 ReleaseAsync 还是 Dispose 都不会绕过在途等待。
+        var wait = InFlightWait;
+
+        if (wait is not null)
+        {
+            try
+            {
+                // 有界同步等;超时/异常都照旧往下释放
+                // (关句柄正是打断卡死那一帧的手段)。
+                wait(InFlightWaitTimeout).Wait(InFlightWaitTimeout);
+            }
+            catch
+            {
+                // 等待本身失败不影响释放
+            }
+        }
 
         // 超时也要继续往下走:关闭 Service 的句柄正是打断"卡在半途的同步读"的手段。
         // 但要把情况记下来,别让现场以为是自己点了停止。
@@ -316,27 +361,15 @@ public sealed class DevicePipeline : IDisposable
     /// (先停旧循环、释放串口,再让调用方去开新连接),
     /// 只是不再占用界面线程。顺序不能改成"后台随手释放"——
     /// 那样新流水线会和还没放手的旧连接抢同一个 COM 口。
+    ///
+    /// 在途等待不在这里单独做,已经收口进 <see cref="Dispose"/>:
+    /// 早先只有本方法等 InFlightWait,直接 Dispose 的路径(关窗)绕过了它,
+    /// "写完了才关连接"取决于调用方记得挑哪个方法 —— 迟早会漏一次。
+    /// 现在同步与异步两条路径都先等、再释,本方法只负责把释放挪离调用线程。
     /// </summary>
-    public async Task ReleaseAsync()
+    public Task ReleaseAsync()
     {
-        // 先等闸门里的在途写结束:Dispose 会关串口句柄,
-        // 而正在发帧的那一帧正握着同一个句柄 —— 抢起来就是"写入偶发失败/串口异常"。
-        // 等待有超时,超时就照旧释放:宁可丢一次写,也不能让界面卡在释放上。
-        var wait = InFlightWait;
-
-        if (wait is not null)
-        {
-            try
-            {
-                await wait(TimeSpan.FromSeconds(3)).ConfigureAwait(true);
-            }
-            catch
-            {
-                // 等待本身失败不影响释放
-            }
-        }
-
-        await Task.Run(() => Dispose()).ConfigureAwait(true);
+        return Task.Run(Dispose);
     }
 
 }

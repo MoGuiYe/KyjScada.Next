@@ -24,6 +24,14 @@ public sealed class ModbusRtuTransport : IModbusTransport
     private SerialPort? _port;
     private readonly object _ioLock = new();
 
+    /// <summary>已释放。Dispose 之后不允许再用:否则会悄悄重开串口,把端口重新占住。</summary>
+    private volatile bool _disposed;
+
+    private void EnsureNotDisposed()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(ModbusRtuTransport));
+    }
+
     public ModbusRtuTransport(
         string portName, int baudRate, int parity, int dataBits, int stopBits, byte unitId = 1)
     {
@@ -78,6 +86,7 @@ public sealed class ModbusRtuTransport : IModbusTransport
 
     public void Connect()
     {
+        EnsureNotDisposed();
         if (IsConnected) return;
 
         var since = DateTime.UtcNow - _lastFailUtc;
@@ -121,21 +130,27 @@ public sealed class ModbusRtuTransport : IModbusTransport
 
     public void Disconnect()
     {
-        try
+        // 与在途帧互斥:直接关串口会把正在读/写的那一帧腰斩成半帧,
+        // 之后每一帧都从错误的边界开始解析(现场表现:一断就连续报 CRC 错)。
+        // Monitor 可重入,Execute 的失败分支在本线程调它不会自锁。
+        lock (_ioLock)
         {
-            if (_port is not null)
+            try
             {
-                if (_port.IsOpen) _port.Close();
-                _port.Dispose();
+                if (_port is not null)
+                {
+                    if (_port.IsOpen) _port.Close();
+                    _port.Dispose();
+                }
             }
-        }
-        catch
-        {
-            // 关串口失败不影响后续重连
-        }
-        finally
-        {
-            _port = null;
+            catch
+            {
+                // 关串口失败不影响后续重连
+            }
+            finally
+            {
+                _port = null;
+            }
         }
     }
 
@@ -357,6 +372,8 @@ public sealed class ModbusRtuTransport : IModbusTransport
 
     public void Dispose()
     {
+        _disposed = true;
+
         Disconnect();
     }
 }

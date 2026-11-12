@@ -149,10 +149,15 @@ public partial class MainWindow
     private void ApplyJogPermissions()
     {
         var hasJog = HasPermission(PermissionBit.CanJog);
+
+        // 急停不是"点动":它一次性把整片点写 0,还带 confirmed:true 跳过差异确认。
+        // 按设计只给 CanForce(管理员)—— 之前判 CanJog,等于把急停降级成了点动权限。
+        var hasForce = HasPermission(PermissionBit.CanForce);
+
         var hasAny = _jogRows.Count > 0;
         var idle = !_jogBusy;
 
-        if (EstopBtn is not null) EstopBtn.IsEnabled = hasJog && idle && hasAny;
+        if (EstopBtn is not null) EstopBtn.IsEnabled = hasForce && idle && hasAny;
         if (JogOnBtn is not null) JogOnBtn.IsEnabled = hasJog && idle && hasAny;
         if (JogOffBtn is not null) JogOffBtn.IsEnabled = hasJog && idle && hasAny;
         if (JogVarBox is not null) JogVarBox.IsEnabled = hasAny && idle;
@@ -253,9 +258,9 @@ public partial class MainWindow
             return;
         }
 
-        if (!HasPermission(PermissionBit.CanJog))
+        if (!HasPermission(PermissionBit.CanForce))
         {
-            JogResultText.Text = "✘ 没有「点动」权限,不能操作急停";
+            JogResultText.Text = "✘ 没有「强制写」权限,不能操作急停(急停会整片写 0,按设计只给管理员)";
             return;
         }
 
